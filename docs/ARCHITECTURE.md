@@ -1,76 +1,44 @@
-# Architecture — OBD Master Intelligence Tester AI
+# Architecture
 
-## Overview
-
-Clean Architecture + MVVM + Repository, Kotlin, Jetpack Compose, Hilt DI, Room persistence, Coroutines/Flow.
+Clean Architecture + MVVM + Repository + Hilt + Room + Compose.
 
 ```mermaid
 flowchart TB
-  UI[Compose UI + ViewModels]
-  DOM[Domain: models, repository interfaces, use cases]
-  DATA[Data: Room, OkHttp, Transport, Repository impl]
-  OBD[OBD engine: ELM, Modes, Protocol, ISO-TP, UDS, SafetyGate]
-  AI[AI providers + EncryptedSharedPreferences]
-  PDF[PdfDocument report generator]
+  UI[Compose UI + MainViewModel]
+  DOM[Domain models + repository interfaces]
+  HUB[TransportHub]
+  T1[BT Classic]
+  T2[BLE]
+  T3[WiFi TCP]
+  T4[USB serial]
+  ELM[Elm327CommandLayer + SafetyGate]
+  ROOM[(Room catalog + logs + sessions)]
 
   UI --> DOM
-  DOM --> DATA
-  DATA --> OBD
-  DATA --> AI
-  DATA --> PDF
-  OBD --> Safety[SafetyGate READ ONLY]
+  DOM --> ELM
+  ELM --> HUB
+  HUB --> T1 & T2 & T3 & T4
+  ELM --> ROOM
 ```
-
-## Layers
-
-| Layer | Package | Responsibility |
-|-------|---------|----------------|
-| Presentation | `ui.*` | Compose screens, `MainViewModel`, navigation drawer |
-| Domain | `domain.*` | Models, repository contracts — no Android deps |
-| Data | `data.*` | Room, remote stub, transport, repository implementations |
-| OBD | `obd.*` | Command builders/parsers, protocol discovery, safety |
-| Cross-cutting | `ai`, `pdf`, `scoring`, `vehicle`, `knowledge`, `di` | Features + Hilt module |
-
-## MVVM data flow
 
 ```mermaid
 sequenceDiagram
   participant Screen
   participant VM as MainViewModel
   participant Repo as DiagnosticRepository
-  participant ELM as Elm327CommandLayer
-  participant Gate as SafetyGate
-  participant T as ObdTransport
+  participant Hub as TransportHub
+  participant Adapter as ELM327 hardware
 
-  Screen->>VM: runFullDemo()
-  VM->>Repo: runFullDemoTest()
-  Repo->>T: connect(mock)
-  Repo->>ELM: send(AT/PID)
-  ELM->>Gate: check(command)
-  alt blocked
-    Gate-->>ELM: Blocked
-    ELM-->>Repo: SafetyBlockedException
-  else allowed
-    ELM->>T: transact
-    T-->>ELM: response
-    ELM-->>Repo: parsed / raw
-  end
-  Repo-->>VM: StateFlow updates
-  VM-->>Screen: collectAsState
+  Screen->>VM: connect(target)
+  VM->>Repo: connect
+  Repo->>Hub: connect real transport
+  Hub->>Adapter: RFCOMM/TCP/USB/GATT
+  Adapter-->>Hub: ELM prompt
+  Screen->>VM: runFullDiagnostic
+  VM->>Repo: runFullDiagnostic
+  Repo->>Adapter: AT/PID (via SafetyGate)
+  Adapter-->>Repo: real responses
+  Repo-->>VM: session / error (never fake success)
 ```
 
-## Package map
-
-```
-com.obdmaster.intelligence
-├── di/AppModule.kt
-├── ui/ (MainActivity, MainViewModel, screens/*, components, theme, navigation)
-├── domain/model + repository
-├── data/local (Room) + remote + transport + repository
-├── obd/modes, protocol, adapter, elm, safety, isotp, uds
-├── ai/, pdf/, scoring/, vehicle/, knowledge/
-```
-
-## Dependency rule
-
-UI → Domain ← Data. OBD/AI/PDF are injected into Data/Repository via Hilt `@Singleton` providers. Domain never imports Android framework types (except `java.io.File` on report contract).
+Start destination: **Connect** screen. Diagnostic actions require `ConnectionState.CONNECTED`.

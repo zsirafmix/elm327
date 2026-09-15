@@ -1,67 +1,28 @@
 # OBD protocols, modes, adapters, transports
 
-## Transports (`data.transport`)
+## Transports (production)
 
-| Type | Class | Demo status |
-|------|-------|-------------|
-| Mock | `MockTransport` | **Working** — sample ELM/BMW responses |
-| Bluetooth Classic | `BluetoothClassicTransport` | Stub |
-| BLE | `BleTransport` | Stub |
-| WiFi OBD | `WifiObdTransport` | Stub |
-| USB OTG | `UsbOtgTransport` | Stub |
+| Type | Class | Notes |
+|------|-------|-------|
+| Bluetooth Classic | `BluetoothClassicTransport` | RFCOMM SPP UUID `00001101-0000-1000-8000-00805F9B34FB` |
+| BLE | `BleTransport` | Scan + GATT (FFF0 / Nordic UART / FFE0) |
+| WiFi | `WifiObdTransport` | TCP, default `192.168.0.10:35000` (configurable) |
+| USB OTG | `UsbOtgTransport` | `usb-serial-for-android` (FTDI/CH340/CP210x/…) |
 
-All implement `ObdTransport` (`connect`, `transact`, `connectionState`).
+`TransportHub` selects the active transport. **Mock is rejected** if requested.
 
-## Adapters
+## ELM init
 
-ELM327 · STN1110 · STN2120 · J2534 · CAN — detected via `ATI` / STN identify strings in `AdapterCapabilityTester`.
+`ATZ` → `ATE0` → `ATL0` → `ATS0` → `ATH1` → `ATSP0`
 
-## ELM AT / command layer
+## Modes
 
-`Elm327CommandLayer` wraps transport with:
+Allowed reads: 01, 03, 06, 07, 09, 0A. **Blocked:** 04, 08.
 
-1. `SafetyGate.check`
-2. `transact`
-3. Room `diagnostic_logs` entry (command, response, timestamp, status)
+## Protocols
 
-Init sequence: `ATZ`, `ATE0`, `ATL0`, `ATS0`, `ATH1`, `ATSP0`.
+Detected via `ATDP` / `ATDPN` after auto-search — ISO 9141-2, KWP2000, J1850 PWM/VPW, ISO 15765 CAN variants. Only reported detections are returned (no invented protocol list as “success”).
 
-## OBD-II modes (SAE J1979) — `obd.modes.ObdModes`
+## ECU discovery
 
-| Mode | Purpose | Execution |
-|------|---------|-----------|
-| 01 | Live / current data | Allowed |
-| 02 | Freeze frame | Builder |
-| 03 | Stored DTCs | Allowed |
-| 04 | Clear DTCs | **Blocked** |
-| 05 | O2 sensor (legacy) | Builder |
-| 06 | On-board monitoring | Allowed/demo |
-| 07 | Pending DTCs | Allowed |
-| 08 | Control operation | **Blocked** |
-| 09 | Vehicle info (VIN…) | Allowed |
-| 0A | Permanent DTCs | Allowed |
-
-## Link protocols — `ProtocolDiscovery`
-
-- ISO 9141-2
-- ISO 14230-4 KWP2000
-- SAE J1850 PWM / VPW
-- ISO 15765-4 CAN: 11-bit & 29-bit; 125 / 250 / 500 kbps
-
-Mock default detection: **ISO 15765 CAN 11-bit 500 kbps**.
-
-## ISO-TP — `obd.isotp.IsoTp`
-
-Single Frame / First Frame / Consecutive Frame / Flow Control helpers (framing only).
-
-## UDS ISO 14229 — `obd.uds.UdsServices`
-
-| SID | Name | Status |
-|-----|------|--------|
-| 0x10 | DiagnosticSessionControl | Default session probe builder |
-| 0x11 | ECUReset | **Blocked** |
-| 0x19 | ReadDTCInformation | Allowed path |
-| 0x22 | ReadDataByIdentifier | Allowed path |
-| 0x27 | SecurityAccess | **Blocked** |
-| 0x2F | InputOutputControlByIdentifier | **Blocked** |
-| 0x31 | RoutineControl | **Blocked** |
+Read-only: `ATSH<addr>` + `0100` on known headers (7E0, 7E1, 760, …). Online only if a real positive response is seen.

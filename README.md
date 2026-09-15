@@ -2,102 +2,63 @@
 
 **HU** | [English below](#english)
 
-Professzionális Android diagnosztikai alkalmazás OBD adapter képességteszthez, jármű felismeréshez, ECU feltérképezéshez, AI magyarázathoz és PDF jelentéshez.
+Professzionális Android diagnosztikai alkalmazás **valós** OBD adapter kapcsolattal: képességteszt, jármű felismerés, ECU probe, AI magyarázat, PDF jelentés.
 
-> **Alapértelmezett mód: READ ONLY.** ECU programozás, firmware írás, immobilizer, kulcstanítás és biztonsági hozzáférés módosítás **TILOS** és a kódban blokkolva van.
+> **Alapértelmezett mód: READ ONLY.** ECU programozás, firmware írás, immobilizer, kulcstanítás **TILOS**.  
+> **Nincs demo/mock adat a termékútvonalon.** Élő teszt = élő adapter. Hardver szükséges.
 
 **Repo:** https://github.com/zsirafmix/elm327  
-**Package:** `com.obdmaster.intelligence`  
-**Min SDK:** 29 (Android 10+) · **Target SDK:** 34
+**Package:** `com.obdmaster.intelligence` · minSdk 29 · targetSdk 34
 
 ---
 
 ## Funkciók
 
-- Műszerfal: kapcsolat, adapter, jármű, tesztfolyamat, pontszám-mérők, ECU térkép, CAN chart
-- Menü: Adapter teszt, OBD protokoll, Jármű felismerés, ECU kereső, Járműspecifikus tudás, AI elemzés, PDF jelentés, DB frissítés
-- Transport: Bluetooth Classic, BLE, WiFi OBD, USB OTG (stub) + **MockTransport** demó
-- Adapterek: ELM327, STN1110, STN2120, J2534, CAN
-- OBD módok 01–0A; veszélyesek (04, 08) csak UI probe
-- Protokollok: ISO 9141-2, KWP2000, J1850 PWM/VPW, ISO 15765 CAN (11/29 bit, 125/250/500), ISO-TP, UDS (olvasás; 11/2F/31 blokkolva)
-- VIN dekód + 19 márka; Room seed: BMW F30 320d (ECU 7E0)
-- Online tudás (OkHttp stub + Room cache)
-- AI: Gemini / Groq / Pollination + MockAI; kulcsok EncryptedSharedPreferences-ben
-- Scoring 0–100% + csillagok; PDF `OBD_Report_{VIN}_{DATE}.pdf`
+- **Kapcsolat:** Bluetooth Classic (SPP UUID `00001101-…`), BLE scan, WiFi TCP (pl. `192.168.0.10:35000`), USB OTG (`usb-serial-for-android`)
+- Műszerfal élő állapottal, pontszámokkal, ECU térképpel (csak probe eredmények)
+- OBD Mode 01/03/06/07/09/0A olvasás; Mode 04/08 és veszélyes UDS **blokkolva**
+- VIN Mode 09-ből; offline Room **referencia-katalógus** (nem élő eredmény)
+- AI (Gemini/Groq/Pollination) + MockAI kulcs nélkül; PDF csak élő sessionből
 
-## Biztonság (kritikus)
+## Kapcsolódás (kötelező élő teszthez)
 
-Lásd részletesen: [docs/SAFETY.md](docs/SAFETY.md)
+1. Telepítse az APK-t Android 10+ eszközre  
+2. Nyissa a **Kapcsolat / Connect** képernyőt, engedélyezze a Bluetooth / hely engedélyeket  
+3. Válasszon:
+   - **BT Classic:** párosítsa az ELM327-et a rendszerbeállításokban → List bonded → koppintson
+   - **BLE:** Scan BLE OBD → koppintson
+   - **WiFi:** csatlakozzon az adapter AP-hoz → host/port → Connect WiFi
+   - **USB:** OTG kábel → List USB → engedély → koppintson  
+4. Sikeres AT init után: Dashboard → **Run full READ ONLY diagnostic**
 
-- READ ONLY alapértelmezés
-- Blokkolt: Mode 04, Mode 08, UDS 0x11 / 0x2F / 0x31, SecurityAccess, flash, immobilizer
-- Világos hibaüzenetek a UI-n
+## Biztonság
+
+Lásd [docs/SAFETY.md](docs/SAFETY.md). Mode 04/08, UDS 0x11/0x2F/0x31 és flash/immobilizer blokkolva.
 
 ## Tech stack
 
-Kotlin · Jetpack Compose · Clean Architecture + MVVM + Repository · Hilt · Room · Coroutines/Flow · OkHttp · Gradle Kotlin DSL
+Kotlin · Jetpack Compose · Clean Architecture · MVVM · Hilt · Room · Coroutines  
+Bluetooth API · OkHttp · **usb-serial-for-android** · PdfDocument
 
-## Követelmények
-
-- Android Studio Hedgehog / Iguana / Jellyfish (vagy újabb) + JDK 17+
-- Android SDK 34
-- (Opcionális) fizikai OBD adapter — a demó MockTransporttal működik
-
-## Megnyitás Android Studio-ban
-
-1. `git clone https://github.com/zsirafmix/elm327.git`
-2. Android Studio → **Open** → a klónozott mappa
-3. Várja meg a Gradle sync-et
-4. Válasszon emulátort vagy eszközt → **Run**
-
-## APK build
+## Build
 
 ```bash
-# Debug
+git clone https://github.com/zsirafmix/elm327.git
+# Android Studio → Open → Sync (JDK 17+)
 ./gradlew :app:assembleDebug
-
-# Release (aláírás nélkül debug keystore-ral a demo-hoz; élesben saját keystore)
-./gradlew :app:assembleRelease
 ```
 
-Kimenet: `app/build/outputs/apk/debug/app-debug.apk` (debug suffix: `.debug`)
+## AI kulcsok
 
-## AI API kulcsok
-
-1. Az appban: **AI elemzés** képernyő
-2. Gemini / Groq / Pollination kulcs mentése
-3. Tárolás: `EncryptedSharedPreferences` (`obd_ai_keys`) — **soha ne commitoljon kulcsot**
-4. Kulcs nélkül: **MockAI** magyarázatok
-
-Részletek: [docs/API_AI.md](docs/API_AI.md)
-
-## Mock vs hardver
-
-| Mód | Leírás |
-|-----|--------|
-| **Mock (alap)** | `MockTransport` — BMW F30 mintaválaszok, teljes demó offline |
-| **Hardver stub** | BT Classic / BLE / WiFi / USB osztályok léteznek, de a demó a mockot használja |
+AI képernyő → EncryptedSharedPreferences. Soha ne commitoljon kulcsot. Lásd [docs/API_AI.md](docs/API_AI.md).
 
 ## Dokumentáció
 
-| Doc | Tartalom |
-|-----|----------|
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Rétegek, MVVM, adatfolyam |
-| [SAFETY.md](docs/SAFETY.md) | Tiltások, threat model |
-| [OBD_PROTOCOLS.md](docs/OBD_PROTOCOLS.md) | Protokollok, módok, adapterek |
-| [API_AI.md](docs/API_AI.md) | AI provider-ek, kulcstárolás |
-| [PDF_REPORT.md](docs/PDF_REPORT.md) | Jelentés szekciók, export |
-| [DATABASE.md](docs/DATABASE.md) | Room séma, seed |
-| [CHANGELOG.md](docs/CHANGELOG.md) | Verziók |
-| [CONTRIBUTING.md](docs/CONTRIBUTING.md) | Közreműködés |
-
-## Screenshots
-
-Helyőrzők: `assets/screenshots/` — futtatás után illesszen be Dashboard / ECU map / PDF képernyőket.
+[ARCHITECTURE](docs/ARCHITECTURE.md) · [SAFETY](docs/SAFETY.md) · [OBD_PROTOCOLS](docs/OBD_PROTOCOLS.md) · [API_AI](docs/API_AI.md) · [PDF_REPORT](docs/PDF_REPORT.md) · [DATABASE](docs/DATABASE.md) · [CHANGELOG](docs/CHANGELOG.md) · [CONTRIBUTING](docs/CONTRIBUTING.md)
 
 ## Licenc
 
-Forráskód oktatási / demó célra. OBD diagnosztika saját felelősségre. Nincs garancia. Harmadik féltől származó API-k (Gemini, Groq, Pollination) saját feltételeik szerint.
+MIT + safety notice. Nincs garancia. Diagnosztika saját felelősségre.
 
 ---
 
@@ -105,30 +66,14 @@ Forráskód oktatási / demó célra. OBD diagnosztika saját felelősségre. Ni
 
 ## English
 
-Professional Android app for **OBD adapter capability testing**, vehicle recognition, ECU mapping, AI explanations, and PDF reports.
+Production-oriented OBD diagnostic tester for Android. **No mock/demo data on the product path.** You need a real ELM327/STN-compatible adapter (Bluetooth Classic / BLE / WiFi / USB OTG).
 
-**Default: READ ONLY.** ECU programming, firmware write, immobilizer, key learning, and security-access modification are **forbidden** and blocked in code.
+**READ ONLY** by default — Mode 04/08 and UDS reset/IO/routine blocked. PDF and scores come only from a live session after a successful connection.
 
-### Quick start
+### Connect
 
-```bash
-git clone https://github.com/zsirafmix/elm327.git
-# Open in Android Studio, sync Gradle, Run
-./gradlew :app:assembleDebug
-```
+Use the **Connect** screen: bonded SPP devices, BLE scan, WiFi host:port (default `192.168.0.10:35000`), or USB serial via OTG. Then run diagnostics from the Dashboard.
 
-### Safety
+### Build
 
-Mode 04 Clear DTC, Mode 08 Control, UDS 0x11 Reset / 0x2F IO / 0x31 Routine: **UI capability probe only** — execution blocked with clear messages. See `docs/SAFETY.md`.
-
-### AI keys
-
-Enter on the AI Analysis screen. Stored via EncryptedSharedPreferences. Without keys, MockAI is used. Never commit secrets.
-
-### Stack
-
-Kotlin, Jetpack Compose, Clean Architecture, MVVM, Repository, Hilt, Room, Coroutines/Flow, OkHttp, Gradle KTS.
-
-### License note
-
-Educational / demo use. No warranty. Third-party AI APIs subject to their own terms.
+Open in Android Studio (JDK 17+, SDK 34) or `./gradlew :app:assembleDebug`.

@@ -2,48 +2,31 @@
 
 ## Policy
 
-**Default mode: READ ONLY.**
+**Default mode: READ ONLY.** No ECU programming, flash, immobilizer, or key learning.
 
-The application is a diagnostic **tester**, not a programmer. It must never perform vehicle security or firmware modification operations.
+## Forbidden (hard block via `SafetyGate`)
 
-## Forbidden (hard block)
+| Category | Enforcement |
+|----------|-------------|
+| Mode 04 Clear DTC | Blocked |
+| Mode 08 Control | Blocked |
+| UDS 0x11 / 0x2F / 0x31 / 0x27 | Blocked |
+| Flash / firmware / immobilizer / key learn keywords | Blocked |
 
-| Category | Examples | Enforcement |
-|----------|----------|-------------|
-| ECU programming / flash | firmware write, bootloader, EEPROM write | `SafetyGate` pattern match |
-| Immobilizer / keys | immobilizer, key learn/prog | `SafetyGate` pattern match |
-| Security access modification | seed-key unlock write, 0x27 | SID + keyword block |
-| Mode 04 Clear DTC | OBD service `04` | prefix block + clear UI message |
-| Mode 08 Control | OBD service `08` | prefix block |
-| UDS 0x11 ECU Reset | `11 xx` | SID block |
-| UDS 0x2F IO Control | `2F …` | SID block |
-| UDS 0x31 Routine Control | `31 …` | SID block |
+UI may list these as **capability probe labels only** — execution throws `SafetyBlockedException`.
 
-## Capability probe / UI only
+## No demo substitution
 
-These may appear in the Adapter test UI as **labels** (`SafetyGate.DANGEROUS_CAPABILITY_LABELS`) so users understand what a professional tool *could* do — but **execution is blocked**:
-
-- Mode 04 Clear DTC (probe only)
-- Mode 08 Control (probe only)
-- UDS 0x11 ECU Reset (blocked)
-- UDS 0x2F IO Control (blocked)
-- UDS 0x31 Routine Control (blocked)
-
-Allowed UDS-oriented paths (read): 0x19 ReadDTCInformation, 0x22 ReadDataByIdentifier; session 0x10 default-session probe only as documentation/builder.
-
-## User-facing messages
-
-Blocked commands throw `SafetyBlockedException` → repository → `lastBlocked` StateFlow → Adapter screen shows reason.
+- Failed connection → error message (no fake success)
+- Missing VIN → empty / incomplete VIN (no catalog VIN injected as live)
+- PDF requires an actual `DiagnosticSession` from a connected adapter
+- Offline Room catalog (`REF-…` keys) is reference knowledge only
 
 ## Threat model notes
 
 | Threat | Mitigation |
 |--------|------------|
-| Accidental DTC clear | Mode 04 never sent in READ ONLY |
-| Malicious routine / actuator | 0x2F / 0x31 blocked |
-| Key / immobilizer abuse | keyword + SecurityAccess block |
-| API key leakage | EncryptedSharedPreferences; `.gitignore` secrets |
-| Cleartext secrets in git | No keys in repo; `local.properties.example` only |
-| USB/BT misuse | Hardware transports are stubs; demo uses MockTransport |
-
-**Not a safety guarantee for modified forks.** Distributors who remove `SafetyGate` accept legal and safety liability.
+| Accidental DTC clear / actuator | SafetyGate |
+| API key leakage | EncryptedSharedPreferences; gitignore |
+| Cleartext to public net | Network security config; cleartext only for known local OBD WiFi hosts |
+| Bus disruption | Protocol auto (ATSP0); no forced write protocols; ECU probe is read (`0100`) only |
