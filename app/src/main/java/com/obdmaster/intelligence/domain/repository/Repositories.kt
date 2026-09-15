@@ -6,6 +6,8 @@ import kotlinx.coroutines.flow.StateFlow
 
 interface DiagnosticRepository {
     val connectionState: StateFlow<ConnectionState>
+    val activeTransport: StateFlow<TransportType?>
+    val activeAdapterName: StateFlow<String>
     val adapterType: StateFlow<AdapterType>
     val vehicleInfo: StateFlow<VehicleInfo>
     val testProgress: StateFlow<TestProgress>
@@ -15,10 +17,16 @@ interface DiagnosticRepository {
     val livePids: StateFlow<List<LivePid>>
     val lastBlocked: StateFlow<SafetyResult.Blocked?>
     val isReadOnly: StateFlow<Boolean>
+    val lastError: StateFlow<String?>
 
-    suspend fun connectMock()
+    suspend fun listBluetoothDevices(): List<AdapterDevice>
+    suspend fun scanBleDevices(timeoutMs: Long = 8000): List<AdapterDevice>
+    suspend fun listUsbDevices(): List<AdapterDevice>
+    suspend fun connect(target: ConnectionTarget)
     suspend fun disconnect()
-    suspend fun runFullDemoTest(): DiagnosticSession
+
+    /** Full diagnostic against the connected adapter. Throws if not connected. */
+    suspend fun runFullDiagnostic(): DiagnosticSession
     suspend fun runAdapterTest(): AdapterCapabilities
     suspend fun runProtocolDiscovery(): List<ObdProtocol>
     suspend fun recognizeVehicle(): VehicleInfo
@@ -28,8 +36,9 @@ interface DiagnosticRepository {
 }
 
 interface VehicleRepository {
-    suspend fun getSeededBmwF30(): VehicleInfo?
-    suspend fun getEcusForVin(vin: String): List<EcuNode>
+    /** Offline reference catalog entry (not a live VIN). */
+    suspend fun getReferenceCatalogBmwF30(): VehicleInfo?
+    suspend fun getReferenceEcus(catalogKey: String): List<EcuNode>
     suspend fun listBrands(): List<String>
 }
 

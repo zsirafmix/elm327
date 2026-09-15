@@ -26,6 +26,8 @@ class MainViewModel @Inject constructor(
 ) : ViewModel() {
 
     val connectionState = diagnostic.connectionState
+    val activeTransport = diagnostic.activeTransport
+    val activeAdapterName = diagnostic.activeAdapterName
     val adapterType = diagnostic.adapterType
     val vehicleInfo = diagnostic.vehicleInfo
     val testProgress = diagnostic.testProgress
@@ -35,7 +37,10 @@ class MainViewModel @Inject constructor(
     val livePids = diagnostic.livePids
     val lastBlocked = diagnostic.lastBlocked
     val isReadOnly = diagnostic.isReadOnly
+    val lastError = diagnostic.lastError
 
+    private val _devices = MutableStateFlow<List<AdapterDevice>>(emptyList())
+    val devices = _devices.asStateFlow()
     private val _caps = MutableStateFlow<AdapterCapabilities?>(null)
     val caps = _caps.asStateFlow()
     private val _protocols = MutableStateFlow<List<ObdProtocol>>(emptyList())
@@ -52,39 +57,134 @@ class MainViewModel @Inject constructor(
     val message = _message.asStateFlow()
     private val _brands = MutableStateFlow<List<String>>(emptyList())
     val brands = _brands.asStateFlow()
+    private val _catalogNote = MutableStateFlow<String?>(null)
+    val catalogNote = _catalogNote.asStateFlow()
+    private val _wifiHost = MutableStateFlow("192.168.0.10")
+    val wifiHost = _wifiHost.asStateFlow()
+    private val _wifiPort = MutableStateFlow("35000")
+    val wifiPort = _wifiPort.asStateFlow()
+    private val _busy = MutableStateFlow(false)
+    val busy = _busy.asStateFlow()
+
     val dangerousLabels = SafetyGate.DANGEROUS_CAPABILITY_LABELS
 
     init {
         viewModelScope.launch { _brands.value = vehicleRepo.listBrands() }
     }
 
-    fun runFullDemo() = viewModelScope.launch {
-        _message.value = "Running full READ ONLY demo…"
-        val s = diagnostic.runFullDemoTest()
-        _session.value = s
+    fun setWifiHost(v: String) { _wifiHost.value = v }
+    fun setWifiPort(v: String) { _wifiPort.value = v }
+
+    fun refreshBluetooth() = viewModelScope.launch {
+        _busy.value = true
+        _message.value = "Loading bonded Bluetooth devices…"
+        runCatching { _devices.value = diagnostic.listBluetoothDevices() }
+            .onFailure { _message.value = it.message }
+        _busy.value = false
+    }
+
+    fun scanBle() = viewModelScope.launch {
+        _busy.value = true
+        _message.value = "BLE scan (≈8s)…"
+        runCatching { _devices.value = diagnostic.scanBleDevices() }
+            .onFailure { _message.value = it.message }
+        _busy.value = false
+    }
+
+    fun refreshUsb() = viewModelScope.launch {
+        _busy.value = true
+        runCatching { _devices.value = diagnostic.listUsbDevices() }
+            .onFailure { _message.value = it.message }
+        _busy.value = false
+    }
+
+    fun connectDevice(device: AdapterDevice) = viewModelScope.launch {
+        _busy.value = true
+        _message.value = "Connecting to ${device.name}…"
+        runCatching {
+            diagnostic.connect(
+                ConnectionTarget(
+                    transport = device.transport,
+                    address = device.address,
+                    displayName = device.name
+                )
+            )
+        }.onSuccess {
+            _message.value = "Connected: ${device.name}"
+        }.onFailure {
+            _message.value = it.message ?: "Connection failed"
+        }
+        _busy.value = false
+    }
+
+    fun connectWifi() = viewModelScope.launch {
+        _busy.value = true
+        val host = _wifiHost.value.trim()
+        val port = _wifiPort.value.trim().toIntOrNull() ?: 35000
+        _message.value = "Connecting WiFi OBD $host:$port…"
+        runCatching {
+            diagnostic.connect(
+                ConnectionTarget(
+                    transport = TransportType.WIFI,
+                    address = host,
+                    port = port,
+                    displayName = "$host:$port"
+                )
+            )
+        }.onSuccess {
+            _message.value = "Connected WiFi $host:$port"
+        }.onFailure {
+            _message.value = it.message ?: "WiFi connection failed"
+        }
+        _busy.value = false
+    }
+
+    fun disconnect() = viewModelScope.launch {
+        diagnostic.disconnect()
+        _message.value = "Disconnected"
+        _session.value = null
         _caps.value = null
-        _message.value = "Demo complete"
+        _pdfFile.value = null
+    }
+
+    fun runFullDiagnostic() = viewModelScope.launch {
+        _busy.value = true
+        _message.value = "Running READ ONLY diagnostic on live adapter…"
+        runCatching { diagnostic.runFullDiagnostic() }
+            .onSuccess {
+                _session.value = it
+                _message.value = "Diagnostic complete"
+            }
+            .onFailure { _message.value = it.message ?: "Diagnostic failed" }
+        _busy.value = false
     }
 
     fun runAdapterTest() = viewModelScope.launch {
-        diagnostic.connectMock()
-        _caps.value = diagnostic.runAdapterTest()
+        _busy.value = true
+        runCatching { _caps.value = diagnostic.runAdapterTest() }
+            .onFailure { _message.value = it.message }
+        _busy.value = false
     }
 
     fun runProtocol() = viewModelScope.launch {
-        diagnostic.connectMock()
-        _protocols.value = diagnostic.runProtocolDiscovery()
+        _busy.value = true
+        runCatching { _protocols.value = diagnostic.runProtocolDiscovery() }
+            .onFailure { _message.value = it.message }
+        _busy.value = false
     }
 
     fun recognizeVehicle() = viewModelScope.launch {
-        diagnostic.connectMock()
-        diagnostic.recognizeVehicle()
+        _busy.value = true
+        runCatching { diagnostic.recognizeVehicle() }
+            .onFailure { _message.value = it.message }
+        _busy.value = false
     }
 
     fun discoverEcus() = viewModelScope.launch {
-        diagnostic.connectMock()
-        if (vehicleInfo.value.vin.isBlank()) diagnostic.recognizeVehicle()
-        diagnostic.discoverEcus()
+        _busy.value = true
+        runCatching { diagnostic.discoverEcus() }
+            .onFailure { _message.value = it.message }
+        _busy.value = false
     }
 
     fun queryKnowledge(q: String = "vehicle ECU diagnostic protocol BMW 320d") = viewModelScope.launch {
@@ -92,10 +192,22 @@ class MainViewModel @Inject constructor(
     }
 
     fun runAi() = viewModelScope.launch {
-        val base = _session.value ?: diagnostic.runFullDemoTest().also { _session.value = it }
-        val explanation = aiRepo.analyze(base)
-        _ai.value = explanation
-        _session.value = base.copy(aiSummary = "${explanation.simple}\n${explanation.engineering}\n${explanation.practical}")
+        val base = _session.value
+        if (base == null) {
+            _message.value = "Run a live diagnostic first — AI needs a real session (no sample data)."
+            return@launch
+        }
+        _busy.value = true
+        runCatching {
+            val explanation = aiRepo.analyze(base)
+            _ai.value = explanation
+            _session.value = base.copy(
+                aiSummary = "${explanation.simple}
+${explanation.engineering}
+${explanation.practical}"
+            )
+        }.onFailure { _message.value = it.message }
+        _busy.value = false
     }
 
     fun setAiKey(provider: String, key: String) {
@@ -106,14 +218,23 @@ class MainViewModel @Inject constructor(
     fun hasAiKey() = aiRepo.hasAnyKey()
 
     fun generatePdf() = viewModelScope.launch {
-        val s = _session.value ?: diagnostic.runFullDemoTest().also { _session.value = it }
-        val withAi = if (s.aiSummary.isBlank()) {
-            val ex = aiRepo.analyze(s)
-            s.copy(aiSummary = "${ex.simple}\n${ex.engineering}")
-        } else s
-        _session.value = withAi
-        _pdfFile.value = reportRepo.generatePdf(withAi)
-        _message.value = "PDF: ${_pdfFile.value?.name}"
+        val s = _session.value
+        if (s == null) {
+            _message.value = "No live session. Connect adapter and run diagnostic before PDF."
+            return@launch
+        }
+        _busy.value = true
+        runCatching {
+            val withAi = if (s.aiSummary.isBlank()) {
+                val ex = aiRepo.analyze(s)
+                s.copy(aiSummary = "${ex.simple}
+${ex.engineering}")
+            } else s
+            _session.value = withAi
+            _pdfFile.value = reportRepo.generatePdf(withAi)
+            _message.value = "PDF: ${_pdfFile.value?.name}"
+        }.onFailure { _message.value = it.message }
+        _busy.value = false
     }
 
     fun sharePdf() {
@@ -128,7 +249,9 @@ class MainViewModel @Inject constructor(
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        appContext.startActivity(Intent.createChooser(intent, "Share OBD Report").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        appContext.startActivity(
+            Intent.createChooser(intent, "Share OBD Report").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
     }
 
     fun tryBlocked(cmd: String) = viewModelScope.launch {
@@ -138,8 +261,12 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun refreshDbInfo() = viewModelScope.launch {
-        val v = vehicleRepo.getSeededBmwF30()
-        _message.value = "Seed vehicle: ${v?.brand} ${v?.model} VIN=${v?.vin}"
+    fun showReferenceCatalog() = viewModelScope.launch {
+        val v = vehicleRepo.getReferenceCatalogBmwF30()
+        val ecus = vehicleRepo.getReferenceEcus(v?.vin ?: "")
+        _catalogNote.value =
+            "OFFLINE REFERENCE ONLY — ${v?.brand} ${v?.model} (${v?.vin}). " +
+                "${ecus.size} catalog ECUs (online=false). Not a live test result."
+        _message.value = _catalogNote.value
     }
 }

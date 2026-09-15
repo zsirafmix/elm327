@@ -15,24 +15,32 @@ class AdapterCapabilityTester @Inject constructor(
     private val discovery: ProtocolDiscovery
 ) {
     suspend fun test(): AdapterCapabilities {
+        elm.ensureConnected()
         runCatching { elm.initAdapter() }
-        val id = runCatching { elm.identify() }.getOrDefault("ELM327 v1.5")
+        val id = runCatching { elm.identify() }.getOrElse { throw it }
+        val voltage = runCatching { elm.voltage() }.getOrDefault("")
         val type = detectType(id)
         val protocols = discovery.discover()
-        val can = discovery.probeCanVariants()
+        val canMap = discovery.probeCanVariants()
+        val pid00 = runCatching { elm.send("0100") }.getOrDefault("")
+        val supportsObd2 = pid00.uppercase().let {
+            it.contains("41") && !it.contains("NO DATA") && !it.contains("UNABLE")
+        }
         return AdapterCapabilities(
             type = type,
-            firmware = id.lines().firstOrNull()?.trim().orEmpty(),
-            supportsObd2 = true,
-            supportsCan = can.any { it.value },
-            supportsUds = type != AdapterType.ELM327 || true, // demo: soft UDS via ISO-TP
-            supportsIsoTp = true,
+            firmware = id.lines().firstOrNull { it.isNotBlank() && !it.contains(">") }?.trim().orEmpty(),
+            supportsObd2 = supportsObd2,
+            supportsCan = canMap.any { it.value } || protocols.any { it.name.contains("CAN") },
+            supportsUds = type == AdapterType.STN1110 || type == AdapterType.STN2120 || type == AdapterType.J2534,
+            supportsIsoTp = supportsObd2,
             supportsProtocols = protocols,
             baudRates = listOf(125_000, 250_000, 500_000),
             rawResponses = mapOf(
                 "ATI" to id,
+                "ATRV" to voltage,
+                "0100" to pid00,
                 "ATDP" to runCatching { elm.protocolName() }.getOrDefault(""),
-                "probes" to SafetyGate.DANGEROUS_CAPABILITY_LABELS.joinToString("; ")
+                "dangerous_probes_ui_only" to SafetyGate.DANGEROUS_CAPABILITY_LABELS.joinToString("; ")
             )
         )
     }
@@ -42,6 +50,6 @@ class AdapterCapabilityTester @Inject constructor(
         id.contains("STN1110", true) || id.contains("STN", true) -> AdapterType.STN1110
         id.contains("J2534", true) -> AdapterType.J2534
         id.contains("ELM", true) -> AdapterType.ELM327
-        else -> AdapterType.ELM327
+        else -> AdapterType.UNKNOWN
     }
 }

@@ -13,8 +13,8 @@ android {
         applicationId = "com.obdmaster.intelligence"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
@@ -100,6 +100,9 @@ dependencies {
 
     // Gson for simple JSON
     implementation("com.google.code.gson:gson:2.11.0")
+
+    // USB serial ELM327 / STN adapters
+    implementation("com.github.mik3y:usb-serial-for-android:3.8.1")
 
     // Tests
     testImplementation("junit:junit:4.13.2")

@@ -31,7 +31,7 @@ fun AiScreen(vm: MainViewModel) {
             Button(onClick = { vm.setAiKey("pollination", poll) }) { Text("Save Pollination") }
             Text("Has key: ${vm.hasAiKey()}")
         }
-        Button(onClick = { vm.runAi() }, modifier = Modifier.fillMaxWidth()) { Text("Run AI analysis") }
+        Button(onClick = { vm.runAi() }, modifier = Modifier.fillMaxWidth()) { Text("Analyze last LIVE session") }
         ai?.let {
             SectionCard("Simple / Egyszerű") { Text(it.simple) }
             SectionCard("Engineering") { Text(it.engineering) }

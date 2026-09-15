@@ -13,15 +13,19 @@ import com.obdmaster.intelligence.ui.components.SectionCard
 @Composable
 fun DbScreen(vm: MainViewModel) {
     val msg by vm.message.collectAsState()
+    val note by vm.catalogNote.collectAsState()
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        SectionCard("Offline Room DB") {
-            Text("Tables: vehicles, ecus, dtc_codes, standards, test_sessions, diagnostic_logs, knowledge_cache")
-            Text("Seed: BMW F30 320d VIN WBA3A5C50EF123456, ECU 7E0 with VIN/DTC/Live/DPF/EGR")
+        SectionCard("Offline Room — reference catalog") {
+            Text(
+                "Tables: vehicles, ecus, dtc_codes, standards, test_sessions, diagnostic_logs, knowledge_cache.
+" +
+                    "BMW F30 320d entry is an OFFLINE REFERENCE (REF-… key), never injected as a live VIN or test result."
+            )
         }
-        Button(onClick = { vm.refreshDbInfo() }, modifier = Modifier.fillMaxWidth()) {
-            Text("Show seed vehicle / DB update stub")
+        Button(onClick = { vm.showReferenceCatalog() }, modifier = Modifier.fillMaxWidth()) {
+            Text("Show reference catalog note")
         }
+        note?.let { Text(it, color = MaterialTheme.colorScheme.tertiary) }
         msg?.let { Text(it) }
-        Text("Online update: KnowledgeApi stub + Room cache. Wire real CDN later.")
     }
 }

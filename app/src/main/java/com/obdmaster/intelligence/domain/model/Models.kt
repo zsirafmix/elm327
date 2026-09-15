@@ -2,6 +2,7 @@ package com.obdmaster.intelligence.domain.model
 
 enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
 enum class AdapterType { ELM327, STN1110, STN2120, J2534, CAN, UNKNOWN }
+/** MOCK exists only so misconfiguration fails loudly — not offered in UI. */
 enum class TransportType { MOCK, BLUETOOTH_CLASSIC, BLE, WIFI, USB_OTG }
 
 enum class ObdProtocol {

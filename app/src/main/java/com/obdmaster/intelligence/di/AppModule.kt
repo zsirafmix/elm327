@@ -9,8 +9,7 @@ import com.obdmaster.intelligence.data.local.SeedData
 import com.obdmaster.intelligence.data.local.dao.*
 import com.obdmaster.intelligence.data.remote.KnowledgeApi
 import com.obdmaster.intelligence.data.repository.*
-import com.obdmaster.intelligence.data.transport.MockTransport
-import com.obdmaster.intelligence.data.transport.ObdTransport
+import com.obdmaster.intelligence.data.transport.*
 import com.obdmaster.intelligence.domain.repository.*
 import com.obdmaster.intelligence.knowledge.OnlineKnowledgeEngine
 import com.obdmaster.intelligence.obd.adapter.AdapterCapabilityTester
@@ -66,14 +65,8 @@ object AppModule {
     fun provideSafetyGate(): SafetyGate = SafetyGate(readOnly = true)
 
     @Provides @Singleton
-    fun provideMockTransport(): MockTransport = MockTransport()
-
-    @Provides @Singleton
-    fun provideTransport(mock: MockTransport): ObdTransport = mock
-
-    @Provides @Singleton
-    fun provideElmLayer(transport: ObdTransport, safety: SafetyGate, logDao: DiagnosticLogDao): Elm327CommandLayer =
-        Elm327CommandLayer(transport, safety, logDao)
+    fun provideElmLayer(hub: TransportHub, safety: SafetyGate, logDao: DiagnosticLogDao): Elm327CommandLayer =
+        Elm327CommandLayer(hub, safety, logDao)
 
     @Provides @Singleton
     fun provideProtocolDiscovery(elm: Elm327CommandLayer): ProtocolDiscovery = ProtocolDiscovery(elm)
@@ -124,11 +117,11 @@ object AppModule {
         ecuDao: EcuDao,
         sessionDao: TestSessionDao,
         logDao: DiagnosticLogDao,
-        transport: ObdTransport,
+        hub: TransportHub,
         safety: SafetyGate
     ): DiagnosticRepository = DiagnosticRepositoryImpl(
         elm, adapterTester, discovery, vinDecoder, scoreEngine,
-        vehicleDao, ecuDao, sessionDao, logDao, transport, safety
+        vehicleDao, ecuDao, sessionDao, logDao, hub, safety
     )
 
     @Provides @Singleton

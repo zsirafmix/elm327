@@ -5,7 +5,7 @@ import com.obdmaster.intelligence.ai.AiProviderManager
 import com.obdmaster.intelligence.data.local.SeedData
 import com.obdmaster.intelligence.data.local.dao.*
 import com.obdmaster.intelligence.data.local.entity.TestSessionEntity
-import com.obdmaster.intelligence.data.transport.ObdTransport
+import com.obdmaster.intelligence.data.transport.TransportHub
 import com.obdmaster.intelligence.domain.model.*
 import com.obdmaster.intelligence.domain.repository.*
 import com.obdmaster.intelligence.knowledge.OnlineKnowledgeEngine
@@ -33,22 +33,24 @@ class DiagnosticRepositoryImpl @Inject constructor(
     private val ecuDao: EcuDao,
     private val sessionDao: TestSessionDao,
     private val logDao: DiagnosticLogDao,
-    private val transport: ObdTransport,
+    private val hub: TransportHub,
     private val safety: SafetyGate
 ) : DiagnosticRepository {
 
-    private val _connection = MutableStateFlow(ConnectionState.DISCONNECTED)
     private val _adapter = MutableStateFlow(AdapterType.UNKNOWN)
     private val _vehicle = MutableStateFlow(VehicleInfo())
-    private val _progress = MutableStateFlow(TestProgress("Idle", 0f, "Ready"))
+    private val _progress = MutableStateFlow(TestProgress("Idle", 0f, "Connect an adapter to begin"))
     private val _score = MutableStateFlow<OverallScore?>(null)
     private val _ecus = MutableStateFlow<List<EcuNode>>(emptyList())
     private val _can = MutableStateFlow<List<CanFrameSample>>(emptyList())
     private val _pids = MutableStateFlow<List<LivePid>>(emptyList())
     private val _blocked = MutableStateFlow<SafetyResult.Blocked?>(null)
     private val _readOnly = MutableStateFlow(safety.isReadOnly())
+    private val _lastError = MutableStateFlow<String?>(null)
 
-    override val connectionState = _connection.asStateFlow()
+    override val connectionState = hub.connectionState
+    override val activeTransport = hub.activeType
+    override val activeAdapterName = hub.activeName
     override val adapterType = _adapter.asStateFlow()
     override val vehicleInfo = _vehicle.asStateFlow()
     override val testProgress = _progress.asStateFlow()
@@ -58,22 +60,37 @@ class DiagnosticRepositoryImpl @Inject constructor(
     override val livePids = _pids.asStateFlow()
     override val lastBlocked = _blocked.asStateFlow()
     override val isReadOnly = _readOnly.asStateFlow()
+    override val lastError = _lastError.asStateFlow()
 
-    override suspend fun connectMock() {
-        _connection.value = ConnectionState.CONNECTING
-        transport.connect("mock")
-        _connection.value = transport.connectionState.value
-        runCatching { elm.initAdapter() }
-        _adapter.value = AdapterType.ELM327
+    override suspend fun listBluetoothDevices(): List<AdapterDevice> = hub.listBluetoothClassic()
+    override suspend fun scanBleDevices(timeoutMs: Long): List<AdapterDevice> = hub.scanBle(timeoutMs)
+    override suspend fun listUsbDevices(): List<AdapterDevice> = hub.listUsb()
+
+    override suspend fun connect(target: ConnectionTarget) {
+        _lastError.value = null
+        try {
+            hub.connect(target)
+            step("Init", 5f, "Initializing ELM AT sequence…")
+            elm.initAdapter()
+            val id = runCatching { elm.identify() }.getOrDefault("")
+            _adapter.value = detectType(id)
+            step("Connected", 10f, "Connected: ${target.displayName}")
+        } catch (e: Exception) {
+            _lastError.value = e.message ?: e.toString()
+            _progress.value = TestProgress("Error", 0f, _lastError.value ?: "Connection failed")
+            throw e
+        }
     }
 
     override suspend fun disconnect() {
-        transport.disconnect()
-        _connection.value = ConnectionState.DISCONNECTED
+        hub.disconnect()
+        _adapter.value = AdapterType.UNKNOWN
+        _progress.value = TestProgress("Idle", 0f, "Disconnected")
     }
 
     override suspend fun runAdapterTest(): AdapterCapabilities {
-        step("Adapter test", 10f, "Probing adapter…")
+        requireConnected()
+        step("Adapter test", 15f, "Probing adapter capabilities…")
         val caps = adapterTester.test()
         _adapter.value = caps.type
         step("Adapter test", 25f, "Adapter ${caps.type} / ${caps.firmware}")
@@ -81,64 +98,134 @@ class DiagnosticRepositoryImpl @Inject constructor(
     }
 
     override suspend fun runProtocolDiscovery(): List<ObdProtocol> {
-        step("Protocol", 35f, "Discovering protocols…")
+        requireConnected()
+        step("Protocol", 35f, "Auto-detecting protocol…")
         return discovery.discover()
     }
 
     override suspend fun recognizeVehicle(): VehicleInfo {
-        step("Vehicle", 50f, "Reading VIN…")
-        val raw = runCatching { elm.send(ObdModes.mode09Vin()) }.getOrDefault("")
-        val vin = ObdModes.parseVin(raw).ifBlank { SeedData.BMW_F30_VIN }
-        val info = vinDecoder.decode(vin).let { decoded ->
-            vehicleDao.getByVin(vin)?.let { e ->
+        requireConnected()
+        step("Vehicle", 50f, "Reading VIN (Mode 09)…")
+        val raw = try {
+            elm.send(ObdModes.mode09Vin(), timeoutMs = 8000)
+        } catch (e: SafetyBlockedException) {
+            throw e
+        } catch (e: Exception) {
+            _lastError.value = "VIN read failed: ${e.message}"
+            val empty = VehicleInfo()
+            _vehicle.value = empty
+            throw TransportException("Could not read VIN from adapter. ${e.message}", e)
+        }
+        val vin = ObdModes.parseVin(raw)
+        if (vin.length < 17) {
+            _lastError.value = "VIN not available or incomplete from Mode 09 (got "$vin")"
+            val info = VehicleInfo(vin = vin)
+            _vehicle.value = info
+            return info
+        }
+        val decoded = vinDecoder.decode(vin)
+        // Optional enrichment from offline catalog by brand/platform — never inject catalog VIN
+        val enriched = vehicleDao.getAll()
+            .filter { !it.vin.startsWith("REF-") || it.brand.equals(decoded.brand, true) }
+            .firstOrNull { it.brand.equals(decoded.brand, true) && it.platform.isNotBlank() }
+            ?.let { cat ->
                 decoded.copy(
-                    brand = e.brand, model = e.model, year = e.year,
-                    engineCode = e.engineCode, platform = e.platform
+                    model = decoded.model.ifBlank { cat.model },
+                    engineCode = decoded.engineCode.ifBlank { cat.engineCode },
+                    platform = decoded.platform.ifBlank { cat.platform }
                 )
             } ?: decoded
-        }
-        _vehicle.value = info
-        return info
+        _vehicle.value = enriched
+        return enriched
     }
 
     override suspend fun discoverEcus(): List<EcuNode> {
-        step("ECU finder", 65f, "Scanning ECU network…")
-        val vin = _vehicle.value.vin.ifBlank { SeedData.BMW_F30_VIN }
-        val fromDb = ecuDao.forVin(vin)
-        val nodes = if (fromDb.isNotEmpty()) {
-            fromDb.map {
-                EcuNode(
-                    address = it.address,
-                    name = it.name,
-                    category = runCatching { EcuCategory.valueOf(it.category) }.getOrDefault(EcuCategory.UNKNOWN),
-                    protocol = ObdProtocol.ISO_15765_CAN_11BIT_500,
-                    online = true,
-                    dtcCount = if (it.address == "7E0") 1 else 0,
-                    supportsLiveData = it.supportsLiveData,
-                    supportsDpf = it.supportsDpf,
-                    supportsEgr = it.supportsEgr
-                )
+        requireConnected()
+        step("ECU finder", 65f, "Probing known diagnostic addresses (read-only)…")
+        val probes = listOf(
+            Triple("7E0", "Engine", EcuCategory.ENGINE),
+            Triple("7E1", "Transmission", EcuCategory.TRANSMISSION),
+            Triple("760", "ABS", EcuCategory.ABS),
+            Triple("7A0", "Airbag", EcuCategory.AIRBAG),
+            Triple("600", "Body", EcuCategory.BODY),
+            Triple("6A0", "HVAC", EcuCategory.HVAC),
+            Triple("6B0", "Steering", EcuCategory.STEERING),
+            Triple("7F0", "Battery", EcuCategory.BATTERY)
+        )
+        val nodes = mutableListOf<EcuNode>()
+        val canSamples = mutableListOf<CanFrameSample>()
+        val now = System.currentTimeMillis()
+        for ((addr, name, cat) in probes) {
+            val online = probeAddress(addr)
+            var dtcCount = 0
+            var live = false
+            if (online && addr == "7E0") {
+                live = true
+                dtcCount = runCatching {
+                    ObdModes.parseDtcResponse(elm.send("03")).size
+                }.getOrDefault(0)
             }
-        } else defaultEcus()
+            nodes += EcuNode(
+                address = addr,
+                name = name,
+                category = cat,
+                protocol = ObdProtocol.ISO_15765_CAN_11BIT_500,
+                online = online,
+                dtcCount = dtcCount,
+                supportsLiveData = live,
+                supportsDpf = false,
+                supportsEgr = false
+            )
+            if (online) {
+                canSamples += CanFrameSample(addr, "RESP OK", now)
+            }
+        }
         _ecus.value = nodes
-        _can.value = sampleCan(nodes)
-        return nodes
+        _can.value = canSamples
+        // Enrich DPF/EGR flags from catalog only as capability hints when brand matches — not as online proof
+        val brand = _vehicle.value.brand
+        if (brand.isNotBlank()) {
+            val ref = ecuDao.forVin(SeedData.CATALOG_BMW_F30).filter {
+                brand.equals("BMW", true)
+            }
+            if (ref.isNotEmpty()) {
+                _ecus.value = nodes.map { n ->
+                    val hint = ref.firstOrNull { it.address.equals(n.address, true) }
+                    if (hint != null && n.online) n.copy(
+                        supportsDpf = hint.supportsDpf,
+                        supportsEgr = hint.supportsEgr,
+                        supportsLiveData = n.supportsLiveData || hint.supportsLiveData
+                    ) else n
+                }
+            }
+        }
+        return _ecus.value
     }
 
-    override suspend fun runFullDemoTest(): DiagnosticSession {
-        connectMock()
+    override suspend fun runFullDiagnostic(): DiagnosticSession {
+        requireConnected()
+        _lastError.value = null
         val caps = runAdapterTest()
         val protocols = runProtocolDiscovery()
-        val vehicle = recognizeVehicle()
+        val vehicle = runCatching { recognizeVehicle() }.getOrElse {
+            _lastError.value = it.message
+            VehicleInfo()
+        }
         val ecus = discoverEcus()
-        step("Live data", 75f, "Reading PIDs…")
-        readLiveDemo()
-        step("Scoring", 85f, "Computing scores…")
-        val score = scoreEngine.score(caps, protocols, ecus, vehicle.vin.length == 17)
+        step("Live data", 75f, "Reading Mode 01 PIDs…")
+        readLiveFromAdapter()
+        runCatching { elm.send("06") }
+        runCatching { elm.send("07") }
+        runCatching { elm.send("0A") }
+        step("Scoring", 90f, "Scoring from real responses…")
+        val score = scoreEngine.score(
+            caps, protocols, ecus,
+            vinOk = vehicle.vin.length == 17
+        )
         _score.value = score
-        step("Done", 100f, "Demo test complete (READ ONLY)")
+        step("Done", 100f, "Diagnostic complete (READ ONLY)")
         val session = DiagnosticSession(
-            vin = vehicle.vin,
+            vin = vehicle.vin.ifBlank { "UNKNOWN" },
             adapterType = caps.type,
             protocol = protocols.firstOrNull() ?: ObdProtocol.UNKNOWN,
             score = score,
@@ -165,11 +252,15 @@ class DiagnosticRepositoryImpl @Inject constructor(
 
     override suspend fun tryDangerousCommand(command: String): SafetyResult {
         return try {
+            requireConnected()
             elm.send(command)
             SafetyResult.Allowed
         } catch (e: SafetyBlockedException) {
             _blocked.value = e.blocked
             e.blocked
+        } catch (e: NotConnectedException) {
+            _lastError.value = e.message
+            SafetyResult.Blocked(e.message ?: "Not connected", command)
         }
     }
 
@@ -178,37 +269,60 @@ class DiagnosticRepositoryImpl @Inject constructor(
             list.map { "${it.timestamp} [${it.status}] ${it.command} -> ${it.response}" }
         }
 
-    private suspend fun readLiveDemo() {
-        val rpm = ObdModes.parseMode01(0x0C, runCatching { elm.send("010C") }.getOrDefault("")) ?: 1726f
-        val speed = ObdModes.parseMode01(0x0D, runCatching { elm.send("010D") }.getOrDefault("")) ?: 0f
-        val cool = ObdModes.parseMode01(0x05, runCatching { elm.send("0105") }.getOrDefault("")) ?: 83f
-        _pids.value = listOf(
-            LivePid("0C", "Engine RPM", rpm, "rpm"),
-            LivePid("0D", "Vehicle Speed", speed, "km/h"),
-            LivePid("05", "Coolant Temp", cool, "°C")
-        )
+    private fun requireConnected() {
+        if (!hub.isConnected()) {
+            val msg = "No adapter connected. Use Connect screen (Bluetooth / WiFi / USB)."
+            _lastError.value = msg
+            throw NotConnectedException(msg)
+        }
+    }
+
+    private suspend fun probeAddress(headerHex: String): Boolean {
+        return try {
+            elm.send("ATSH$headerHex", timeoutMs = 2000)
+            val resp = elm.send("0100", timeoutMs = 3000)
+            val u = resp.uppercase()
+            when {
+                u.contains("NO DATA") -> false
+                u.contains("UNABLE") -> false
+                u.contains("ERROR") -> false
+                u.contains("BUS INIT") && u.contains("ERROR") -> false
+                u.contains("41 00") || u.contains("4100") -> true
+                u.contains("7E8") || u.contains("7E9") -> true
+                else -> u.contains("41") // weak positive
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private suspend fun readLiveFromAdapter() {
+        val list = mutableListOf<LivePid>()
+        fun add(pid: Int, name: String, unit: String) {
+            runCatching {
+                val raw = elm.send(ObdModes.mode01Pid(pid), timeoutMs = 3000)
+                val v = ObdModes.parseMode01(pid, raw) ?: return@runCatching
+                list += LivePid("%02X".format(pid), name, v, unit)
+            }
+        }
+        add(0x0C, "Engine RPM", "rpm")
+        add(0x0D, "Vehicle Speed", "km/h")
+        add(0x05, "Coolant Temp", "°C")
+        add(0x0B, "MAP", "kPa")
+        add(0x11, "Throttle", "%")
+        _pids.value = list
     }
 
     private fun step(step: String, pct: Float, msg: String) {
         _progress.value = TestProgress(step, pct, msg)
     }
 
-    private fun defaultEcus() = listOf(
-        EcuNode("7E0", "Engine", EcuCategory.ENGINE, ObdProtocol.ISO_15765_CAN_11BIT_500, true, 1, true, true, true),
-        EcuNode("760", "ABS", EcuCategory.ABS, online = true),
-        EcuNode("7A0", "Airbag", EcuCategory.AIRBAG, online = true),
-        EcuNode("7E1", "Transmission", EcuCategory.TRANSMISSION, online = true),
-        EcuNode("600", "Body", EcuCategory.BODY, online = true),
-        EcuNode("6A0", "HVAC", EcuCategory.HVAC, online = true),
-        EcuNode("6B0", "Steering", EcuCategory.STEERING, online = true),
-        EcuNode("7F0", "Battery", EcuCategory.BATTERY, online = true)
-    )
-
-    private fun sampleCan(nodes: List<EcuNode>): List<CanFrameSample> {
-        val now = System.currentTimeMillis()
-        return nodes.take(8).mapIndexed { i, n ->
-            CanFrameSample(n.address, "00 00 %02X %02X".format(i, i * 3), now + i * 10L)
-        }
+    private fun detectType(id: String): AdapterType = when {
+        id.contains("STN2120", true) -> AdapterType.STN2120
+        id.contains("STN1110", true) || id.contains("STN", true) -> AdapterType.STN1110
+        id.contains("J2534", true) -> AdapterType.J2534
+        id.contains("ELM", true) -> AdapterType.ELM327
+        else -> AdapterType.ELM327
     }
 }
 
@@ -217,17 +331,17 @@ class VehicleRepositoryImpl @Inject constructor(
     private val vehicleDao: VehicleDao,
     private val ecuDao: EcuDao
 ) : VehicleRepository {
-    override suspend fun getSeededBmwF30(): VehicleInfo? =
-        vehicleDao.getByVin(SeedData.BMW_F30_VIN)?.let {
+    override suspend fun getReferenceCatalogBmwF30(): VehicleInfo? =
+        vehicleDao.getByVin(SeedData.CATALOG_BMW_F30)?.let {
             VehicleInfo(it.vin, it.brand, it.model, it.year, it.engineCode, it.platform)
         }
 
-    override suspend fun getEcusForVin(vin: String): List<EcuNode> =
-        ecuDao.forVin(vin).map {
+    override suspend fun getReferenceEcus(catalogKey: String): List<EcuNode> =
+        ecuDao.forVin(catalogKey).map {
             EcuNode(
                 it.address, it.name,
                 runCatching { EcuCategory.valueOf(it.category) }.getOrDefault(EcuCategory.UNKNOWN),
-                online = true,
+                online = false, // catalog — not live
                 supportsLiveData = it.supportsLiveData,
                 supportsDpf = it.supportsDpf,
                 supportsEgr = it.supportsEgr

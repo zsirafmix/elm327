@@ -2,41 +2,46 @@ package com.obdmaster.intelligence.data.local
 
 import com.obdmaster.intelligence.data.local.entity.*
 
+/**
+ * Offline reference catalog only — NOT live test results.
+ * VIN keys here are catalog placeholders (REF-…) and must never be shown as a measured VIN.
+ */
 object SeedData {
-    const val BMW_F30_VIN = "WBA3A5C50EF123456"
+
+    const val CATALOG_BMW_F30 = "REF-BMW-F30-320D"
 
     suspend fun seedIfEmpty(db: ObdDatabase) {
         if (db.vehicleDao().count() == 0) {
             db.vehicleDao().upsert(
                 VehicleEntity(
-                    vin = BMW_F30_VIN,
+                    vin = CATALOG_BMW_F30,
                     brand = "BMW",
                     model = "320d",
                     year = 2014,
                     engineCode = "N47D20",
                     platform = "F30",
-                    notes = "Example seed vehicle — diesel, DPF/EGR capable ECU 7E0"
+                    notes = "OFFLINE REFERENCE CATALOG — typical ECU map for BMW F30 320d. Not a live measurement."
                 )
             )
         }
         if (db.ecuDao().count() == 0) {
             db.ecuDao().insertAll(
                 listOf(
-                    EcuEntity(vin = BMW_F30_VIN, address = "7E0", name = "Engine DME", category = "ENGINE",
+                    EcuEntity(vin = CATALOG_BMW_F30, address = "7E0", name = "Engine DME", category = "ENGINE",
                         supportsVin = true, supportsDtc = true, supportsLiveData = true,
                         supportsDpf = true, supportsEgr = true),
-                    EcuEntity(vin = BMW_F30_VIN, address = "7E1", name = "Transmission EGS", category = "TRANSMISSION",
+                    EcuEntity(vin = CATALOG_BMW_F30, address = "7E1", name = "Transmission EGS", category = "TRANSMISSION",
                         supportsDtc = true, supportsLiveData = true),
-                    EcuEntity(vin = BMW_F30_VIN, address = "760", name = "ABS/DSC", category = "ABS",
+                    EcuEntity(vin = CATALOG_BMW_F30, address = "760", name = "ABS/DSC", category = "ABS",
                         supportsDtc = true, supportsLiveData = true),
-                    EcuEntity(vin = BMW_F30_VIN, address = "7A0", name = "Airbag ACSM", category = "AIRBAG",
+                    EcuEntity(vin = CATALOG_BMW_F30, address = "7A0", name = "Airbag ACSM", category = "AIRBAG",
                         supportsDtc = true),
-                    EcuEntity(vin = BMW_F30_VIN, address = "600", name = "Body FEM", category = "BODY",
+                    EcuEntity(vin = CATALOG_BMW_F30, address = "600", name = "Body FEM", category = "BODY",
                         supportsDtc = true),
-                    EcuEntity(vin = BMW_F30_VIN, address = "6A0", name = "HVAC IHKA", category = "HVAC"),
-                    EcuEntity(vin = BMW_F30_VIN, address = "6B0", name = "EPS Steering", category = "STEERING",
+                    EcuEntity(vin = CATALOG_BMW_F30, address = "6A0", name = "HVAC IHKA", category = "HVAC"),
+                    EcuEntity(vin = CATALOG_BMW_F30, address = "6B0", name = "EPS Steering", category = "STEERING",
                         supportsLiveData = true),
-                    EcuEntity(vin = BMW_F30_VIN, address = "7F0", name = "Battery IBS", category = "BATTERY",
+                    EcuEntity(vin = CATALOG_BMW_F30, address = "7F0", name = "Battery IBS", category = "BATTERY",
                         supportsLiveData = true)
                 )
             )

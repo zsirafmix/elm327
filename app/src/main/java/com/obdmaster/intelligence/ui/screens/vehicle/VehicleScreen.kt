@@ -9,6 +9,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.obdmaster.intelligence.domain.model.ConnectionState
 import com.obdmaster.intelligence.ui.MainViewModel
 import com.obdmaster.intelligence.ui.components.SectionCard
 
@@ -16,19 +17,25 @@ import com.obdmaster.intelligence.ui.components.SectionCard
 fun VehicleScreen(vm: MainViewModel) {
     val vehicle by vm.vehicleInfo.collectAsState()
     val brands by vm.brands.collectAsState()
+    val conn by vm.connectionState.collectAsState()
+    val busy by vm.busy.collectAsState()
+    val msg by vm.message.collectAsState()
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Button(onClick = { vm.recognizeVehicle() }, modifier = Modifier.fillMaxWidth()) {
-            Text("Recognize vehicle (Mode 09 VIN)")
+        Button(
+            onClick = { vm.recognizeVehicle() },
+            enabled = !busy && conn == ConnectionState.CONNECTED,
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Read VIN (Mode 09) from adapter") }
+        SectionCard("Live decode") {
+            Text("VIN: ${vehicle.vin.ifBlank { "—" }}")
+            Text("Brand: ${vehicle.brand.ifBlank { "—" }}")
+            Text("Model: ${vehicle.model.ifBlank { "—" }}")
+            Text("Year: ${vehicle.year ?: "—"}")
+            Text("Engine: ${vehicle.engineCode.ifBlank { "—" }}")
+            Text("Platform: ${vehicle.platform.ifBlank { "—" }}")
         }
-        SectionCard("Decoded") {
-            Text("VIN: ${vehicle.vin}")
-            Text("Brand: ${vehicle.brand}")
-            Text("Model: ${vehicle.model}")
-            Text("Year: ${vehicle.year}")
-            Text("Engine: ${vehicle.engineCode}")
-            Text("Platform: ${vehicle.platform}")
-        }
-        Text("Supported brands", style = MaterialTheme.typography.titleMedium)
+        msg?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        Text("Supported brand decoders", style = MaterialTheme.typography.titleMedium)
         LazyColumn(Modifier.weight(1f)) {
             items(brands) { b -> ListItem(headlineContent = { Text(b) }) }
         }
