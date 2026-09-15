@@ -109,7 +109,7 @@ class UsbOtgTransport @Inject constructor(
         try {
             serialPort.open(connection)
             serialPort.setParameters(38400, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-            this.port = serialPort
+            this@UsbOtgTransport.port = serialPort
             _state.value = ConnectionState.CONNECTED
             true
         } catch (e: Exception) {
@@ -136,9 +136,7 @@ class UsbOtgTransport @Inject constructor(
 
     override suspend fun write(data: String) = withContext(Dispatchers.IO) {
         val p = port ?: throw TransportException("Not connected (USB)")
-        val payload = (if (data.endsWith("
-")) data else "$data
-").toByteArray(Charsets.US_ASCII)
+        val payload = (if (data.endsWith("\n")) data else "$data\n").toByteArray(Charsets.US_ASCII)
         synchronized(lock) { p.write(payload, 2000) }
     }
 

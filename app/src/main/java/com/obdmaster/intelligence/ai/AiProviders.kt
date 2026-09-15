@@ -95,14 +95,24 @@ class AiProviderManager @Inject constructor(
     private val keys: ApiKeyStore,
     private val client: OkHttpClient
 ) {
+    init {
+        // Ensure sidecar metadata exists when keys were saved by an older build
+        keys.ensureSidecar()
+    }
+
     fun hasAnyKey(): Boolean = keys.hasAny()
     fun setKey(provider: String, key: String) = keys.set(provider, key)
+    fun keyPresence(): AiKeyPresence = keys.presence()
+    fun shouldShowSoftPrompt(): Boolean = keys.shouldShowSoftPrompt()
 
+    /**
+     * Auto-loads keys from EncryptedSharedPreferences on every resolve.
+     * Never returns MockAI when a configured key is present.
+     */
     private fun resolve(): AiProvider {
-        keys.get("gemini")?.let { return GeminiProvider(it, client) }
-        keys.get("groq")?.let { return GroqProvider(it, client) }
-        keys.get("pollination")?.let { return PollinationProvider(it, client) }
-        // try pollination without key
+        keys.get(AiKeyContract.KEY_GEMINI)?.let { return GeminiProvider(it, client) }
+        keys.get(AiKeyContract.KEY_GROQ)?.let { return GroqProvider(it, client) }
+        keys.get(AiKeyContract.KEY_POLLINATION)?.let { return PollinationProvider(it, client) }
         return MockAiProvider()
     }
 

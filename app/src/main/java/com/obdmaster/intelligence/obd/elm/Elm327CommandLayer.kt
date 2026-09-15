@@ -23,8 +23,7 @@ class Elm327CommandLayer @Inject constructor(
         ensureConnected()
         val sb = StringBuilder()
         listOf("ATZ", "ATE0", "ATL0", "ATS0", "ATH1", "ATSP0").forEach { cmd ->
-            sb.append(send(cmd, timeoutMs = if (cmd == "ATZ") 3000 else 2000)).append('
-')
+            sb.append(send(cmd, timeoutMs = if (cmd == "ATZ") 3000 else 2000)).append('\n')
         }
         return sb.toString()
     }

@@ -50,7 +50,7 @@ git clone https://github.com/zsirafmix/elm327.git
 
 ## AI kulcsok
 
-AI képernyő → EncryptedSharedPreferences. Soha ne commitoljon kulcsot. Lásd [docs/API_AI.md](docs/API_AI.md).
+Az app **bekéri** a Gemini / Groq / Pollination kulcsokat (HU+EN dialógus az AI képernyőn / Analyze-nál), **elmenti a telefonra** (`obd_ai_keys` EncryptedSharedPreferences + `ai_keys_v1.dat` meta sidecar), és **későbbi verziók ugyanazzal az `applicationId`-vel automatikusan megtalálják** — nem kell újra begépelni. A `.debug` package külön tárhely. Soha ne commitoljon kulcsot. Lásd [docs/API_AI.md](docs/API_AI.md).
 
 ## Dokumentáció
 

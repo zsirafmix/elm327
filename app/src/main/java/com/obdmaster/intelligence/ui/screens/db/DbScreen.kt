@@ -17,8 +17,7 @@ fun DbScreen(vm: MainViewModel) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         SectionCard("Offline Room — reference catalog") {
             Text(
-                "Tables: vehicles, ecus, dtc_codes, standards, test_sessions, diagnostic_logs, knowledge_cache.
-" +
+                "Tables: vehicles, ecus, dtc_codes, standards, test_sessions, diagnostic_logs, knowledge_cache.\n" +
                     "BMW F30 320d entry is an OFFLINE REFERENCE (REF-… key), never injected as a live VIN or test result."
             )
         }

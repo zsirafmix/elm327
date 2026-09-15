@@ -23,7 +23,7 @@ class KnowledgeApi @Inject constructor(
             q.contains("dpf") ->
                 "DPF diagnostics: monitor soot load, differential pressure, regen status via manufacturer PIDs / UDS DIDs (read-only)."
             else ->
-                "Sample knowledge stub for "$query". Connect a knowledge backend later; results are Room-cached."
+                "Sample knowledge stub for \"$query\". Connect a knowledge backend later; results are Room-cached."
         }
         return "stub-okhttp" to answer
     }

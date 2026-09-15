@@ -118,7 +118,7 @@ class DiagnosticRepositoryImpl @Inject constructor(
         }
         val vin = ObdModes.parseVin(raw)
         if (vin.length < 17) {
-            _lastError.value = "VIN not available or incomplete from Mode 09 (got "$vin")"
+            _lastError.value = "VIN not available or incomplete from Mode 09 (got \"$vin\")"
             val info = VehicleInfo(vin = vin)
             _vehicle.value = info
             return info
@@ -298,7 +298,7 @@ class DiagnosticRepositoryImpl @Inject constructor(
 
     private suspend fun readLiveFromAdapter() {
         val list = mutableListOf<LivePid>()
-        fun add(pid: Int, name: String, unit: String) {
+        suspend fun add(pid: Int, name: String, unit: String) {
             runCatching {
                 val raw = elm.send(ObdModes.mode01Pid(pid), timeoutMs = 3000)
                 val v = ObdModes.parseMode01(pid, raw) ?: return@runCatching
@@ -368,6 +368,8 @@ class AiRepositoryImpl @Inject constructor(
     override suspend fun explainScore(score: OverallScore) = ai.explainScore(score)
     override fun hasAnyKey() = ai.hasAnyKey()
     override fun setKey(provider: String, key: String) = ai.setKey(provider, key)
+    override fun keyPresence() = ai.keyPresence()
+    override fun shouldShowSoftPrompt() = ai.shouldShowSoftPrompt()
 }
 
 @Singleton

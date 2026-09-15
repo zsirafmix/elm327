@@ -40,7 +40,7 @@ object ObdModes {
             .map { it.value.toInt(16).toChar() }
             .joinToString("")
         // Fallback: extract printable after 49 02
-        val cleaned = response.uppercase().replace(" ", "").replace("\R", "").replace(">", "")
+        val cleaned = response.uppercase().replace(" ", "").replace("\r", "").replace(">", "")
         val idx = cleaned.indexOf("4902")
         if (idx >= 0) {
             val hexPart = cleaned.substring(idx + 4).takeWhile { it in "0123456789ABCDEF" }
@@ -55,7 +55,7 @@ object ObdModes {
     }
 
     fun parseDtcResponse(response: String): List<String> {
-        val cleaned = response.uppercase().replace(" ", "").replace("\R", "").replace(">", "")
+        val cleaned = response.uppercase().replace(" ", "").replace("\r", "").replace(">", "")
         // 43 xx or 47 xx
         val start = cleaned.indexOfFirst { it == '4' }
         if (start < 0) return emptyList()

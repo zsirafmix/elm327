@@ -246,9 +246,7 @@ class BleTransport @Inject constructor(
     override suspend fun write(data: String) = withContext(Dispatchers.IO) {
         val g = gatt ?: throw TransportException("Not connected (BLE)")
         val ch = writeChar ?: throw TransportException("BLE write characteristic missing")
-        val payload = (if (data.endsWith("
-")) data else "$data
-").toByteArray(Charsets.US_ASCII)
+        val payload = (if (data.endsWith("\n")) data else "$data\n").toByteArray(Charsets.US_ASCII)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val code = g.writeCharacteristic(ch, payload, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
             if (code != BluetoothStatusCodes.SUCCESS) throw TransportException("BLE write failed code=$code")

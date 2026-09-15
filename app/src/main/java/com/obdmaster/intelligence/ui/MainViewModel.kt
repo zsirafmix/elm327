@@ -65,11 +65,14 @@ class MainViewModel @Inject constructor(
     val wifiPort = _wifiPort.asStateFlow()
     private val _busy = MutableStateFlow(false)
     val busy = _busy.asStateFlow()
+    private val _aiKeyPresence = MutableStateFlow(aiRepo.keyPresence())
+    val aiKeyPresence = _aiKeyPresence.asStateFlow()
 
     val dangerousLabels = SafetyGate.DANGEROUS_CAPABILITY_LABELS
 
     init {
         viewModelScope.launch { _brands.value = vehicleRepo.listBrands() }
+        refreshAiKeyPresence()
     }
 
     fun setWifiHost(v: String) { _wifiHost.value = v }
@@ -202,20 +205,40 @@ class MainViewModel @Inject constructor(
             val explanation = aiRepo.analyze(base)
             _ai.value = explanation
             _session.value = base.copy(
-                aiSummary = "${explanation.simple}
-${explanation.engineering}
-${explanation.practical}"
+                aiSummary = "${explanation.simple}\n${explanation.engineering}\n${explanation.practical}"
             )
         }.onFailure { _message.value = it.message }
         _busy.value = false
     }
 
     fun setAiKey(provider: String, key: String) {
+        if (key.isBlank()) return
         aiRepo.setKey(provider, key)
-        _message.value = "API key stored encrypted for $provider"
+        refreshAiKeyPresence()
+        _message.value =
+            "Mentve a telefonra — a következő app-verziók automatikusan használják / Saved on phone — later app versions will find it automatically"
+    }
+
+    fun saveAiKeys(gemini: String, groq: String, pollination: String) {
+        var saved = false
+        if (gemini.isNotBlank()) { aiRepo.setKey("gemini", gemini); saved = true }
+        if (groq.isNotBlank()) { aiRepo.setKey("groq", groq); saved = true }
+        if (pollination.isNotBlank()) { aiRepo.setKey("pollination", pollination); saved = true }
+        if (saved) {
+            refreshAiKeyPresence()
+            _message.value =
+                "Mentve a telefonra — a következő app-verziók automatikusan használják / Saved on phone — later app versions will find it automatically"
+        }
     }
 
     fun hasAiKey() = aiRepo.hasAnyKey()
+
+    fun refreshAiKeyPresence() {
+        _aiKeyPresence.value = aiRepo.keyPresence()
+    }
+
+    /** Soft prompt once when navigating to AI with no keys. */
+    fun shouldShowAiKeySoftPrompt(): Boolean = aiRepo.shouldShowSoftPrompt()
 
     fun generatePdf() = viewModelScope.launch {
         val s = _session.value
@@ -227,8 +250,7 @@ ${explanation.practical}"
         runCatching {
             val withAi = if (s.aiSummary.isBlank()) {
                 val ex = aiRepo.analyze(s)
-                s.copy(aiSummary = "${ex.simple}
-${ex.engineering}")
+                s.copy(aiSummary = "${ex.simple}\n${ex.engineering}")
             } else s
             _session.value = withAi
             _pdfFile.value = reportRepo.generatePdf(withAi)

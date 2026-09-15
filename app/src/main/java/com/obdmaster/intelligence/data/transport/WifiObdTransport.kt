@@ -72,7 +72,7 @@ class WifiObdTransport @Inject constructor() : ObdTransport {
 
     override suspend fun write(data: String) = withContext(Dispatchers.IO) {
         val out = output ?: throw TransportException("Not connected (WiFi)")
-        val payload = if (data.endsWith("")) data else "$data"
+        val payload = if (data.endsWith("\r")) data else "$data\r"
         synchronized(lock) {
             out.write(payload.toByteArray(Charsets.US_ASCII))
             out.flush()

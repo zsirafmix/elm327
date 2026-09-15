@@ -1,5 +1,6 @@
 package com.obdmaster.intelligence.domain.repository
 
+import com.obdmaster.intelligence.ai.AiKeyPresence
 import com.obdmaster.intelligence.domain.model.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -52,6 +53,8 @@ interface AiRepository {
     suspend fun explainScore(score: OverallScore): AiExplanation
     fun hasAnyKey(): Boolean
     fun setKey(provider: String, key: String)
+    fun keyPresence(): AiKeyPresence
+    fun shouldShowSoftPrompt(): Boolean
 }
 
 interface ReportRepository {
