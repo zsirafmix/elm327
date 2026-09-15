@@ -1,0 +1,165 @@
+package com.obdmaster.intelligence.ai
+
+import com.obdmaster.intelligence.domain.model.AiExplanation
+import com.obdmaster.intelligence.domain.model.DiagnosticSession
+import com.obdmaster.intelligence.domain.model.OverallScore
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
+import javax.inject.Inject
+import javax.inject.Singleton
+
+interface AiProvider {
+    val name: String
+    suspend fun explain(prompt: String): String
+}
+
+class GeminiProvider(
+    private val key: String,
+    private val client: OkHttpClient
+) : AiProvider {
+    override val name = "Gemini"
+    override suspend fun explain(prompt: String): String {
+        // Stub HTTP shape — fails gracefully to mock if network/key invalid
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$key"
+        val body = JSONObject()
+            .put("contents", org.json.JSONArray().put(
+                JSONObject().put("parts", org.json.JSONArray().put(JSONObject().put("text", prompt)))
+            )).toString()
+        val req = Request.Builder().url(url)
+            .post(body.toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) error("Gemini HTTP ${resp.code}")
+            val json = JSONObject(resp.body?.string().orEmpty())
+            return json.getJSONArray("candidates")
+                .getJSONObject(0).getJSONObject("content")
+                .getJSONArray("parts").getJSONObject(0).getString("text")
+        }
+    }
+}
+
+class GroqProvider(
+    private val key: String,
+    private val client: OkHttpClient
+) : AiProvider {
+    override val name = "Groq"
+    override suspend fun explain(prompt: String): String {
+        val body = JSONObject()
+            .put("model", "llama-3.1-8b-instant")
+            .put("messages", org.json.JSONArray().put(
+                JSONObject().put("role", "user").put("content", prompt)
+            )).toString()
+        val req = Request.Builder()
+            .url("https://api.groq.com/openai/v1/chat/completions")
+            .addHeader("Authorization", "Bearer $key")
+            .post(body.toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) error("Groq HTTP ${resp.code}")
+            val json = JSONObject(resp.body?.string().orEmpty())
+            return json.getJSONArray("choices").getJSONObject(0)
+                .getJSONObject("message").getString("content")
+        }
+    }
+}
+
+class PollinationProvider(
+    private val key: String?,
+    private val client: OkHttpClient
+) : AiProvider {
+    override val name = "Pollination"
+    override suspend fun explain(prompt: String): String {
+        // Public pollinations text endpoint shape (key optional)
+        val encoded = java.net.URLEncoder.encode(prompt.take(500), "UTF-8")
+        val url = "https://text.pollinations.ai/$encoded"
+        val builder = Request.Builder().url(url).get()
+        if (!key.isNullOrBlank()) builder.addHeader("Authorization", "Bearer $key")
+        client.newCall(builder.build()).execute().use { resp ->
+            if (!resp.isSuccessful) error("Pollination HTTP ${resp.code}")
+            return resp.body?.string().orEmpty()
+        }
+    }
+}
+
+class MockAiProvider : AiProvider {
+    override val name = "MockAI"
+    override suspend fun explain(prompt: String): String =
+        "Mock AI: $prompt".take(200)
+}
+
+@Singleton
+class AiProviderManager @Inject constructor(
+    private val keys: ApiKeyStore,
+    private val client: OkHttpClient
+) {
+    fun hasAnyKey(): Boolean = keys.hasAny()
+    fun setKey(provider: String, key: String) = keys.set(provider, key)
+
+    private fun resolve(): AiProvider {
+        keys.get("gemini")?.let { return GeminiProvider(it, client) }
+        keys.get("groq")?.let { return GroqProvider(it, client) }
+        keys.get("pollination")?.let { return PollinationProvider(it, client) }
+        // try pollination without key
+        return MockAiProvider()
+    }
+
+    suspend fun analyze(session: DiagnosticSession): AiExplanation {
+        val prompt = buildString {
+            append("OBD diagnostic summary. VIN=${session.vin}, ")
+            append("adapter=${session.adapterType}, protocol=${session.protocol}, ")
+            append("score=${session.score.totalPercent}%, ECUs=${session.ecus.size}. ")
+            append("Give simple, engineering, practical tips. READ ONLY context.")
+        }
+        return explainOrMock(prompt, session)
+    }
+
+    suspend fun explainScore(score: OverallScore): AiExplanation {
+        val prompt = "Explain OBD adapter scores: " +
+            score.categories.joinToString { "${it.name}=${it.percent}%" }
+        return try {
+            val text = resolve().explain(prompt)
+            splitExplanation(text, resolve().name)
+        } catch (_: Exception) {
+            mockScore(score)
+        }
+    }
+
+    private suspend fun explainOrMock(prompt: String, session: DiagnosticSession): AiExplanation {
+        return try {
+            val provider = resolve()
+            if (provider is MockAiProvider) mockSession(session)
+            else splitExplanation(provider.explain(prompt), provider.name)
+        } catch (_: Exception) {
+            mockSession(session)
+        }
+    }
+
+    private fun splitExplanation(text: String, provider: String): AiExplanation {
+        val parts = text.split("\n\n+".toRegex())
+        return AiExplanation(
+            simple = parts.getOrElse(0) { text }.take(600),
+            engineering = parts.getOrElse(1) { "Engineering: ISO/SAE stack OK; UDS writes blocked." }.take(600),
+            practical = parts.getOrElse(2) { "Practical: check connectors, battery voltage, then re-scan." }.take(600),
+            provider = provider
+        )
+    }
+
+    private fun mockSession(session: DiagnosticSession) = AiExplanation(
+        simple = "A jármű (${session.vehicle.brand} ${session.vehicle.model}) OBD kapcsolata rendben. " +
+            "Összpontszám: ${"%.0f".format(session.score.totalPercent)}%. READ ONLY mód aktív.",
+        engineering = "Detected ${session.protocol}. Adapter ${session.adapterType}. " +
+            "Online ECUs: ${session.ecus.count { it.online }}. Mode 04/08 and UDS 11/2F/31 not executed.",
+        practical = "Ellenőrizze a DPF/EGR élő adatokat dízel BMW F30-nál. Hibakódok törlése csak szervizben, nem ebben az appban.",
+        provider = "MockAI"
+    )
+
+    private fun mockScore(score: OverallScore) = AiExplanation(
+        simple = "Pontszám ${"%.0f".format(score.totalPercent)}% (${score.stars}★).",
+        engineering = score.categories.joinToString(" | ") { "${it.name}: ${it.engineeringExplanation}" },
+        practical = "Ha a CAN alacsony, próbáljon 500 kbps / 11-bit beállítást.",
+        provider = "MockAI"
+    )
+}

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBD Master Intelligence</string>
+    <string name="safety_readonly">READ ONLY mode — write/control commands blocked</string>
+    <string name="blocked_cmd">This command is blocked in READ ONLY diagnostic mode for safety.</string>
+</resources>

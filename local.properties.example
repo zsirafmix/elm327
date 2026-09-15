@@ -1,0 +1,3 @@
+## Copy to local.properties (never commit secrets)
+sdk.dir=/path/to/Android/Sdk
+# Optional AI keys go in-app via EncryptedSharedPreferences UI, not here.
