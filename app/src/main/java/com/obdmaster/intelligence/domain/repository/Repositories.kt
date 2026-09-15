@@ -19,21 +19,35 @@ interface DiagnosticRepository {
     val lastBlocked: StateFlow<SafetyResult.Blocked?>
     val isReadOnly: StateFlow<Boolean>
     val lastError: StateFlow<String?>
+    val autoTestState: StateFlow<AutoTestState>
 
     suspend fun listBluetoothDevices(): List<AdapterDevice>
     suspend fun scanBleDevices(timeoutMs: Long = 8000): List<AdapterDevice>
     suspend fun listUsbDevices(): List<AdapterDevice>
+    fun isBluetoothAvailable(): Boolean
+    fun isBluetoothEnabled(): Boolean
     suspend fun connect(target: ConnectionTarget)
     suspend fun disconnect()
 
     /** Full diagnostic against the connected adapter. Throws if not connected. */
     suspend fun runFullDiagnostic(): DiagnosticSession
+    /** Fully automatic pipeline with per-step AutoTestState updates. */
+    suspend fun runAutoTestPipeline(
+        analyzeAi: suspend (DiagnosticSession) -> AiExplanation,
+        savePdf: suspend (DiagnosticSession) -> java.io.File,
+        isCancelled: () -> Boolean = { false }
+    ): DiagnosticSession
+    suspend fun runElmInit(): String
     suspend fun runAdapterTest(): AdapterCapabilities
     suspend fun runProtocolDiscovery(): List<ObdProtocol>
     suspend fun recognizeVehicle(): VehicleInfo
     suspend fun discoverEcus(): List<EcuNode>
+    suspend fun readMode01Live(): List<LivePid>
+    suspend fun readMode03Dtcs(): List<DtcCode>
+    suspend fun readModes06_07_09_0A(): Map<String, String>
     suspend fun tryDangerousCommand(command: String): SafetyResult
     fun observeLogs(): Flow<List<String>>
+    fun resetAutoTestState()
 }
 
 interface VehicleRepository {

@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.2.0] — 2026-09-15
+
+### Fixed
+- Bluetooth Classic: insecure SPP → secure SPP → reflection channels 1–5; cancelDiscovery; 14s timeout; drain + settle delay
+- Connect UX (HU): BT off / permission / not paired messages; BT settings + enable; auto-refresh bonded list after permission grant
+- Classic vs BLE tip for ELM327 clones
+
+### Added
+- AutoTest: kapcsolat után automatikus teljes READ ONLY pipeline + látványos progress UI
+- Lépések: ELM init → adapter → protokoll → Mode 01/03/06/07/09/0A → ECU → scoring → AI → PDF auto-save
+- PDF záró oldalak: **AI összefoglaló (érthetően)** + **Tanácsok / ajánlások** (HU; kulcs nélkül is determinisztikus összegzés)
+- Egyéni tesztek továbbra is elérhetők a menüből
+
+### Changed
+- versionName 1.2.0 / versionCode 4
+- PDF mentés: `filesDir/reports`
+
+
 ## [1.1.1] — 2026-09-15
 
 ### Added

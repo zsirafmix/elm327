@@ -39,6 +39,9 @@ class TransportHub @Inject constructor(
     fun isConnected(): Boolean =
         active?.connectionState?.value == ConnectionState.CONNECTED
 
+    fun isBluetoothAvailable(): Boolean = bluetoothClassic.isBluetoothAvailable()
+    fun isBluetoothEnabled(): Boolean = bluetoothClassic.isBluetoothEnabled()
+
     suspend fun listBluetoothClassic(): List<AdapterDevice> = bluetoothClassic.listBondedDevices()
 
     suspend fun scanBle(timeoutMs: Long = 8000): List<AdapterDevice> = ble.scan(timeoutMs)

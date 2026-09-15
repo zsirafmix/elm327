@@ -2,6 +2,7 @@ package com.obdmaster.intelligence.ui.navigation
 
 sealed class NavRoutes(val route: String, val titleHu: String, val titleEn: String) {
     data object Connect : NavRoutes("connect", "Kapcsolat", "Connect")
+    data object AutoTest : NavRoutes("autotest", "Auto teszt", "Auto test")
     data object Dashboard : NavRoutes("dashboard", "Műszerfal", "Dashboard")
     data object Adapter : NavRoutes("adapter", "Adapter teszt", "Adapter test")
     data object Protocol : NavRoutes("protocol", "OBD protokoll", "OBD protocol")
@@ -13,6 +14,6 @@ sealed class NavRoutes(val route: String, val titleHu: String, val titleEn: Stri
     data object Db : NavRoutes("db", "Adatbázis / katalógus", "DB / catalog")
 
     companion object {
-        val menu = listOf(Connect, Dashboard, Adapter, Protocol, Vehicle, Ecu, Knowledge, Ai, Report, Db)
+        val menu = listOf(Connect, AutoTest, Dashboard, Adapter, Protocol, Vehicle, Ecu, Knowledge, Ai, Report, Db)
     }
 }

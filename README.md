@@ -14,11 +14,12 @@ Professzionális Android diagnosztikai alkalmazás **valós** OBD adapter kapcso
 
 ## Funkciók
 
-- **Kapcsolat:** Bluetooth Classic (SPP UUID `00001101-…`), BLE scan, WiFi TCP (pl. `192.168.0.10:35000`), USB OTG (`usb-serial-for-android`)
-- Műszerfal élő állapottal, pontszámokkal, ECU térképpel (csak probe eredmények)
+- **Kapcsolat:** Bluetooth Classic (SPP: insecure→secure→reflection), BLE scan, WiFi TCP, USB OTG
+- **AutoTest:** sikeres kapcsolat után automatikus teljes READ ONLY teszt + progress UI + PDF auto-save
+- Műszerfal élő állapottal, pontszámokkal, ECU térképpel (csak probe eredmények); egyéni tesztek megmaradtak
 - OBD Mode 01/03/06/07/09/0A olvasás; Mode 04/08 és veszélyes UDS **blokkolva**
 - VIN Mode 09-ből; offline Room **referencia-katalógus** (nem élő eredmény)
-- AI (Gemini/Groq/Pollination) + MockAI kulcs nélkül; PDF csak élő sessionből
+- AI (Gemini/Groq/Pollination) + helyi HU összefoglaló/tanács kulcs nélkül; PDF záró AI oldalak
 
 ## Kapcsolódás (kötelező élő teszthez)
 
@@ -29,7 +30,8 @@ Professzionális Android diagnosztikai alkalmazás **valós** OBD adapter kapcso
    - **BLE:** Scan BLE OBD → koppintson
    - **WiFi:** csatlakozzon az adapter AP-hoz → host/port → Connect WiFi
    - **USB:** OTG kábel → List USB → engedély → koppintson  
-4. Sikeres AT init után: Dashboard → **Run full READ ONLY diagnostic**
+4. Sikeres kapcsolat után az **Auto teszt** automatikusan elindul (vagy menü → Auto teszt)
+5. Kézi: Dashboard / Adapter / Protocol / … egyéni tesztek továbbra is elérhetők
 
 ## Biztonság
 
@@ -72,7 +74,7 @@ Production-oriented OBD diagnostic tester for Android. **No mock/demo data on th
 
 ### Connect
 
-Use the **Connect** screen: bonded SPP devices, BLE scan, WiFi host:port (default `192.168.0.10:35000`), or USB serial via OTG. Then run diagnostics from the Dashboard.
+Use the **Connect** screen: bonded SPP devices (robust Classic connect), BLE scan, WiFi host:port, or USB OTG. After connect, **AutoTest** runs the full READ ONLY pipeline and saves a PDF.
 
 ### Build
 

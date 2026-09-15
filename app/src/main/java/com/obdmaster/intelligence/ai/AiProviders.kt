@@ -118,10 +118,11 @@ class AiProviderManager @Inject constructor(
 
     suspend fun analyze(session: DiagnosticSession): AiExplanation {
         val prompt = buildString {
-            append("OBD diagnostic summary. VIN=${session.vin}, ")
-            append("adapter=${session.adapterType}, protocol=${session.protocol}, ")
-            append("score=${session.score.totalPercent}%, ECUs=${session.ecus.size}. ")
-            append("Give simple, engineering, practical tips. READ ONLY context.")
+            append("OBD diagnostic summary in Hungarian (plain language) then English engineering notes. ")
+            append("VIN=${session.vin}, adapter=${session.adapterType}, protocol=${session.protocol}, ")
+            append("score=${session.score.totalPercent}%, onlineECUs=${session.ecus.count { it.online }}. ")
+            append("Paragraphs: (1) plain HU summary what results mean, (2) engineering, (3) practical, ")
+            append("(4+) bullet advice: adapter quality, what works, workshop vs hobby, next steps. READ ONLY.")
         }
         return explainOrMock(prompt, session)
     }
@@ -149,27 +150,78 @@ class AiProviderManager @Inject constructor(
 
     private fun splitExplanation(text: String, provider: String): AiExplanation {
         val parts = text.split("\n\n+".toRegex())
+        val simple = parts.getOrElse(0) { text }.take(600)
+        val engineering = parts.getOrElse(1) { "Engineering: ISO/SAE stack OK; UDS writes blocked." }.take(600)
+        val practical = parts.getOrElse(2) { "Practical: check connectors, battery voltage, then re-scan." }.take(600)
+        val advice = parts.drop(3).flatMap { it.lines() }
+            .map { it.trim().removePrefix("-").removePrefix("•").trim() }
+            .filter { it.isNotBlank() }
+            .ifEmpty {
+                listOf(
+                    "Ellenőrizze az adapter csatlakozását és az akkufeszültséget.",
+                    "Olcsó klónoknál preferálja a Classic SPP párosítást (nem BLE).",
+                    "Hibakód törlés / ECU írás nem elérhető ebben az appban — szerviz."
+                )
+            }
         return AiExplanation(
-            simple = parts.getOrElse(0) { text }.take(600),
-            engineering = parts.getOrElse(1) { "Engineering: ISO/SAE stack OK; UDS writes blocked." }.take(600),
-            practical = parts.getOrElse(2) { "Practical: check connectors, battery voltage, then re-scan." }.take(600),
-            provider = provider
+            simple = simple,
+            engineering = engineering,
+            practical = practical,
+            provider = provider,
+            advice = advice.take(8),
+            summaryHu = simple
         )
     }
 
-    private fun mockSession(session: DiagnosticSession) = AiExplanation(
-        simple = "A jármű (${session.vehicle.brand} ${session.vehicle.model}) OBD kapcsolata rendben. " +
-            "Összpontszám: ${"%.0f".format(session.score.totalPercent)}%. READ ONLY mód aktív.",
-        engineering = "Detected ${session.protocol}. Adapter ${session.adapterType}. " +
-            "Online ECUs: ${session.ecus.count { it.online }}. Mode 04/08 and UDS 11/2F/31 not executed.",
-        practical = "Ellenőrizze a DPF/EGR élő adatokat dízel BMW F30-nál. Hibakódok törlése csak szervizben, nem ebben az appban.",
-        provider = "MockAI"
-    )
+    private fun mockSession(session: DiagnosticSession): AiExplanation {
+        val pct = session.score.totalPercent
+        val online = session.ecus.count { it.online }
+        val brand = session.vehicle.brand.ifBlank { "ismeretlen márka" }
+        val model = session.vehicle.model.ifBlank { "" }
+        val summaryHu = buildString {
+            append("Élő OBD teszt kész. ")
+            append("Jármű: $brand $model. ")
+            append("Adapter: ${session.adapterType}, protokoll: ${session.protocol}. ")
+            append("Összpontszám: ${"%.0f".format(pct)}% (${session.score.stars}★). ")
+            append("Online ECU: $online / ${session.ecus.size}. ")
+            when {
+                pct >= 80f -> append("A kommunikáció erősnek tűnik — hobbi és alapdiagnosztika célra megfelelő.")
+                pct >= 50f -> append("Részleges siker: néhány funkció működik, máshol gyenge válasz — adapter vagy kábel minőségét érdemes javítani.")
+                else -> append("Gyenge eredmény: ellenőrizze a párosítást, igníciót (ON), és próbáljon megbízhatóbb ELM327/STN adaptert.")
+            }
+            append(" Az app READ ONLY — nem töröl hibakódot és nem programoz ECU-t.")
+        }
+        val advice = buildList {
+            add("Használjon Classic Bluetooth (SPP) párosított listát; sok „BLE” feliratú klón valójában Classic.")
+            add("Igníció ON, motor állhat — az OBD-nek tápfeszültség kell.")
+            if (pct < 70f) add("Ha gyakran szakad a kapcsolat: minőségibb adapter (STN1110/2120) vagy USB OTG.")
+            if (online <= 1) add("Csak kevés ECU válaszolt: ez normális sok olcsó adapternél (főleg motor ECU).")
+            add("Workshop / professzionális diagnosztikához dedikált márkaszerszám vagy J2534 ajánlott.")
+            add("Következő lépés: PDF megosztása, hibakódok értelmezése szervizben — Mode 04 törlés tilos itt.")
+            session.score.categories.filter { it.percent < 50f }.take(2).forEach {
+                add("${it.name}: alacsony (${"%.0f".format(it.percent)}%) — ${it.simpleExplanation}")
+            }
+        }
+        return AiExplanation(
+            simple = summaryHu,
+            engineering = "Detected ${session.protocol}. Adapter ${session.adapterType}. " +
+                "Online ECUs: $online. Mode 04/08 and UDS 11/2F/31 not executed. VIN=${session.vin}.",
+            practical = advice.take(3).joinToString(" "),
+            provider = "LocalSummary",
+            advice = advice,
+            summaryHu = summaryHu
+        )
+    }
 
     private fun mockScore(score: OverallScore) = AiExplanation(
         simple = "Pontszám ${"%.0f".format(score.totalPercent)}% (${score.stars}★).",
         engineering = score.categories.joinToString(" | ") { "${it.name}: ${it.engineeringExplanation}" },
         practical = "Ha a CAN alacsony, próbáljon 500 kbps / 11-bit beállítást.",
-        provider = "MockAI"
+        provider = "LocalSummary",
+        advice = listOf(
+            "Alacsony CAN pontszámnál ellenőrizze a protokoll auto-detectet (ATSP0).",
+            "Olcsó SPP klónoknál a Mode 01 gyakran működik, a több-ECU probe ritkán."
+        ),
+        summaryHu = "Pontszám ${"%.0f".format(score.totalPercent)}% (${score.stars}★) a mért adapter/protokoll válaszok alapján."
     )
 }

@@ -96,6 +96,43 @@ data class TestProgress(
     val message: String
 )
 
+enum class AutoTestStepStatus { PENDING, RUNNING, SUCCESS, FAILED, SKIPPED }
+
+data class AutoTestStep(
+    val id: String,
+    val titleHu: String,
+    val titleEn: String,
+    val status: AutoTestStepStatus = AutoTestStepStatus.PENDING,
+    val detail: String = ""
+)
+
+data class AutoTestState(
+    val running: Boolean = false,
+    val overallPercent: Float = 0f,
+    val currentStepId: String? = null,
+    val steps: List<AutoTestStep> = emptyList(),
+    val finished: Boolean = false,
+    val cancelled: Boolean = false,
+    val pdfSaved: Boolean = false,
+    val pdfName: String? = null,
+    val error: String? = null
+) {
+    companion object {
+        fun defaultSteps(): List<AutoTestStep> = listOf(
+            AutoTestStep("elm_init", "ELM inicializálás", "ELM init (ATZ…ATSP0)"),
+            AutoTestStep("adapter", "Adapter képességteszt", "Adapter capability test"),
+            AutoTestStep("protocol", "Protokoll felfedezés", "Protocol discovery"),
+            AutoTestStep("mode01", "Mode 01 élő PID-ek", "Mode 01 live/supported PIDs"),
+            AutoTestStep("mode03", "Mode 03 hibakódok", "Mode 03 DTCs"),
+            AutoTestStep("modes_extra", "Mode 06/07/09/0A", "Mode 06 / 07 / 09 (VIN) / 0A"),
+            AutoTestStep("ecu", "ECU felfedezés", "ECU discovery / probe"),
+            AutoTestStep("scoring", "Pontozás", "Scoring"),
+            AutoTestStep("ai", "AI magyarázat", "AI explanation"),
+            AutoTestStep("pdf", "PDF mentés", "Auto-save PDF")
+        )
+    }
+}
+
 data class DiagnosticSession(
     val id: Long = 0,
     val vin: String,
@@ -106,14 +143,20 @@ data class DiagnosticSession(
     val vehicle: VehicleInfo,
     val aiSummary: String,
     val timestamp: Long,
-    val canSamples: List<CanFrameSample> = emptyList()
+    val canSamples: List<CanFrameSample> = emptyList(),
+    val aiAdvice: List<String> = emptyList(),
+    val aiSummaryHu: String = ""
 )
 
 data class AiExplanation(
     val simple: String,
     val engineering: String,
     val practical: String,
-    val provider: String
+    val provider: String,
+    /** Practical recommendations for PDF / UI (HU preferred). */
+    val advice: List<String> = emptyList(),
+    /** Plain-language HU summary for PDF closing section. */
+    val summaryHu: String = ""
 )
 
 data class KnowledgeResult(

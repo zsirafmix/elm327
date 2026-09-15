@@ -19,6 +19,7 @@ import com.obdmaster.intelligence.domain.model.ConnectionState
 import com.obdmaster.intelligence.ui.navigation.NavRoutes
 import com.obdmaster.intelligence.ui.screens.adapter.AdapterScreen
 import com.obdmaster.intelligence.ui.screens.ai.AiScreen
+import com.obdmaster.intelligence.ui.screens.autotest.AutoTestScreen
 import com.obdmaster.intelligence.ui.screens.connect.ConnectScreen
 import com.obdmaster.intelligence.ui.screens.dashboard.DashboardScreen
 import com.obdmaster.intelligence.ui.screens.db.DbScreen
@@ -52,6 +53,14 @@ fun ObdMasterAppRoot(vm: MainViewModel = hiltViewModel()) {
     val scope = rememberCoroutineScope()
     val readOnly by vm.isReadOnly.collectAsState()
     val conn by vm.connectionState.collectAsState()
+
+    LaunchedEffect(Unit) {
+        vm.navigateToAutoTest.collect {
+            nav.navigate(NavRoutes.AutoTest.route) {
+                launchSingleTop = true
+            }
+        }
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -115,6 +124,7 @@ fun ObdMasterAppRoot(vm: MainViewModel = hiltViewModel()) {
                 modifier = Modifier.padding(padding)
             ) {
                 composable(NavRoutes.Connect.route) { ConnectScreen(vm) }
+                composable(NavRoutes.AutoTest.route) { AutoTestScreen(vm) }
                 composable(NavRoutes.Dashboard.route) { DashboardScreen(vm) }
                 composable(NavRoutes.Adapter.route) { AdapterScreen(vm) }
                 composable(NavRoutes.Protocol.route) { ProtocolScreen(vm) }

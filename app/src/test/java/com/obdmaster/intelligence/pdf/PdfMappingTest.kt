@@ -32,8 +32,9 @@ class PdfMappingTest {
     @Test
     fun requiredSectionsPresentInManifest() {
         val sections = listOf(
-            "Cover", "Vehicle", "Adapter", "Communication", "ECU list", "AI summary", "Final scores"
+            "Cover", "Vehicle", "Adapter", "Communication", "ECU list",
+            "AI összefoglaló", "Tanácsok", "Final scores"
         )
-        assertThat(sections).containsAtLeast("Cover", "ECU list", "Final scores")
+        assertThat(sections).containsAtLeast("Cover", "ECU list", "AI összefoglaló", "Tanácsok")
     }
 }

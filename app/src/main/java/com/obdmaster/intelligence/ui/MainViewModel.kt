@@ -10,6 +10,7 @@ import com.obdmaster.intelligence.domain.repository.*
 import com.obdmaster.intelligence.obd.safety.SafetyGate
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.io.File
@@ -38,6 +39,7 @@ class MainViewModel @Inject constructor(
     val lastBlocked = diagnostic.lastBlocked
     val isReadOnly = diagnostic.isReadOnly
     val lastError = diagnostic.lastError
+    val autoTestState = diagnostic.autoTestState
 
     private val _devices = MutableStateFlow<List<AdapterDevice>>(emptyList())
     val devices = _devices.asStateFlow()
@@ -67,28 +69,75 @@ class MainViewModel @Inject constructor(
     val busy = _busy.asStateFlow()
     private val _aiKeyPresence = MutableStateFlow(aiRepo.keyPresence())
     val aiKeyPresence = _aiKeyPresence.asStateFlow()
+    private val _btAvailable = MutableStateFlow(diagnostic.isBluetoothAvailable())
+    val bluetoothAvailable = _btAvailable.asStateFlow()
+    private val _btEnabled = MutableStateFlow(diagnostic.isBluetoothEnabled())
+    val bluetoothEnabled = _btEnabled.asStateFlow()
+
+    /** One-shot navigation request to AutoTest after successful connect. */
+    private val _navigateToAutoTest = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val navigateToAutoTest = _navigateToAutoTest.asSharedFlow()
+
+    private var autoTestJob: Job? = null
+    @Volatile private var autoTestCancelled = false
 
     val dangerousLabels = SafetyGate.DANGEROUS_CAPABILITY_LABELS
 
     init {
         viewModelScope.launch { _brands.value = vehicleRepo.listBrands() }
         refreshAiKeyPresence()
+        refreshBluetoothStatus()
     }
 
     fun setWifiHost(v: String) { _wifiHost.value = v }
     fun setWifiPort(v: String) { _wifiPort.value = v }
+    fun setUserMessage(v: String) { _message.value = v }
+
+    fun refreshBluetoothStatus() {
+        _btAvailable.value = diagnostic.isBluetoothAvailable()
+        _btEnabled.value = diagnostic.isBluetoothEnabled()
+    }
 
     fun refreshBluetooth() = viewModelScope.launch {
         _busy.value = true
-        _message.value = "Loading bonded Bluetooth devices…"
-        runCatching { _devices.value = diagnostic.listBluetoothDevices() }
-            .onFailure { _message.value = it.message }
+        refreshBluetoothStatus()
+        when {
+            !_btAvailable.value -> {
+                _message.value = "Bluetooth hardver nem elérhető ezen a telefonon."
+                _devices.value = emptyList()
+            }
+            !_btEnabled.value -> {
+                _message.value = "A Bluetooth ki van kapcsolva. Kapcsold be, majd List bonded."
+                _devices.value = emptyList()
+            }
+            else -> {
+                _message.value = "Párosított Bluetooth eszközök betöltése…"
+                runCatching { _devices.value = diagnostic.listBluetoothDevices() }
+                    .onSuccess {
+                        _message.value = if (_devices.value.isEmpty()) {
+                            "Nincs párosított eszköz. Párosítsd az ELM327-et a rendszer BT beállításaiban."
+                        } else {
+                            "${_devices.value.size} párosított eszköz"
+                        }
+                    }
+                    .onFailure {
+                        _message.value = it.message
+                        // Surface real exception to lastError path via message
+                    }
+            }
+        }
         _busy.value = false
     }
 
     fun scanBle() = viewModelScope.launch {
         _busy.value = true
-        _message.value = "BLE scan (≈8s)…"
+        refreshBluetoothStatus()
+        if (!_btEnabled.value) {
+            _message.value = "Bluetooth ki van kapcsolva — BLE scan nem indítható."
+            _busy.value = false
+            return@launch
+        }
+        _message.value = "BLE scan (≈8s)… Ha Classic SPP adapter, használd a Classic listát."
         runCatching { _devices.value = diagnostic.scanBleDevices() }
             .onFailure { _message.value = it.message }
         _busy.value = false
@@ -103,7 +152,11 @@ class MainViewModel @Inject constructor(
 
     fun connectDevice(device: AdapterDevice) = viewModelScope.launch {
         _busy.value = true
-        _message.value = "Connecting to ${device.name}…"
+        _message.value = "Csatlakozás: ${device.name}…"
+        if (device.transport == TransportType.BLE) {
+            _message.value =
+                "BLE csatlakozás: ${device.name}… (ha sikertelen, próbáld Classic párosított listán)"
+        }
         runCatching {
             diagnostic.connect(
                 ConnectionTarget(
@@ -113,9 +166,15 @@ class MainViewModel @Inject constructor(
                 )
             )
         }.onSuccess {
-            _message.value = "Connected: ${device.name}"
+            _message.value = "Kapcsolódva: ${device.name} — AutoTest indul…"
+            _busy.value = false
+            _navigateToAutoTest.tryEmit(Unit)
+            startAutoTest()
+            return@launch
         }.onFailure {
-            _message.value = it.message ?: "Connection failed"
+            // Surface real exception message (incl. insecure/secure/reflection attempts)
+            val detail = it.message ?: it.toString()
+            _message.value = detail
         }
         _busy.value = false
     }
@@ -124,7 +183,7 @@ class MainViewModel @Inject constructor(
         _busy.value = true
         val host = _wifiHost.value.trim()
         val port = _wifiPort.value.trim().toIntOrNull() ?: 35000
-        _message.value = "Connecting WiFi OBD $host:$port…"
+        _message.value = "WiFi OBD $host:$port…"
         runCatching {
             diagnostic.connect(
                 ConnectionTarget(
@@ -135,7 +194,11 @@ class MainViewModel @Inject constructor(
                 )
             )
         }.onSuccess {
-            _message.value = "Connected WiFi $host:$port"
+            _message.value = "WiFi kapcsolódva — AutoTest indul…"
+            _busy.value = false
+            _navigateToAutoTest.tryEmit(Unit)
+            startAutoTest()
+            return@launch
         }.onFailure {
             _message.value = it.message ?: "WiFi connection failed"
         }
@@ -143,11 +206,60 @@ class MainViewModel @Inject constructor(
     }
 
     fun disconnect() = viewModelScope.launch {
+        cancelAutoTest()
         diagnostic.disconnect()
         _message.value = "Disconnected"
         _session.value = null
         _caps.value = null
         _pdfFile.value = null
+        diagnostic.resetAutoTestState()
+    }
+
+    fun startAutoTest() {
+        viewModelScope.launch { startAutoTestInternal() }
+    }
+
+    private suspend fun startAutoTestInternal() {
+        autoTestJob?.cancel()
+        autoTestCancelled = false
+        diagnostic.resetAutoTestState()
+        _busy.value = true
+        _message.value = "Automatikus teljes teszt fut…"
+        autoTestJob = viewModelScope.launch {
+            runCatching {
+                diagnostic.runAutoTestPipeline(
+                    analyzeAi = { session ->
+                        val ex = aiRepo.analyze(session)
+                        _ai.value = ex
+                        ex
+                    },
+                    savePdf = { session ->
+                        val file = reportRepo.generatePdf(session)
+                        _pdfFile.value = file
+                        file
+                    },
+                    isCancelled = { autoTestCancelled }
+                )
+            }.onSuccess {
+                _session.value = it
+                _message.value = "AutoTest kész. PDF: ${_pdfFile.value?.name ?: it.aiSummaryHu.take(40)}"
+            }.onFailure {
+                if (autoTestCancelled) {
+                    _message.value = "AutoTest megszakítva"
+                } else {
+                    _message.value = it.message ?: "AutoTest failed"
+                }
+            }
+            _busy.value = false
+        }
+        autoTestJob?.join()
+    }
+
+    fun cancelAutoTest() {
+        autoTestCancelled = true
+        autoTestJob?.cancel()
+        _busy.value = false
+        _message.value = "AutoTest megszakítás kérve…"
     }
 
     fun runFullDiagnostic() = viewModelScope.launch {
@@ -205,7 +317,9 @@ class MainViewModel @Inject constructor(
             val explanation = aiRepo.analyze(base)
             _ai.value = explanation
             _session.value = base.copy(
-                aiSummary = "${explanation.simple}\n${explanation.engineering}\n${explanation.practical}"
+                aiSummary = "${explanation.simple}\n${explanation.engineering}\n${explanation.practical}",
+                aiAdvice = explanation.advice,
+                aiSummaryHu = explanation.summaryHu.ifBlank { explanation.simple }
             )
         }.onFailure { _message.value = it.message }
         _busy.value = false
@@ -237,7 +351,6 @@ class MainViewModel @Inject constructor(
         _aiKeyPresence.value = aiRepo.keyPresence()
     }
 
-    /** Soft prompt once when navigating to AI with no keys. */
     fun shouldShowAiKeySoftPrompt(): Boolean = aiRepo.shouldShowSoftPrompt()
 
     fun generatePdf() = viewModelScope.launch {
@@ -250,7 +363,11 @@ class MainViewModel @Inject constructor(
         runCatching {
             val withAi = if (s.aiSummary.isBlank()) {
                 val ex = aiRepo.analyze(s)
-                s.copy(aiSummary = "${ex.simple}\n${ex.engineering}")
+                s.copy(
+                    aiSummary = "${ex.simple}\n${ex.engineering}",
+                    aiAdvice = ex.advice,
+                    aiSummaryHu = ex.summaryHu.ifBlank { ex.simple }
+                )
             } else s
             _session.value = withAi
             _pdfFile.value = reportRepo.generatePdf(withAi)

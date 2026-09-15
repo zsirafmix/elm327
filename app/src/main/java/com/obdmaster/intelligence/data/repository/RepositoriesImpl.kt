@@ -47,6 +47,7 @@ class DiagnosticRepositoryImpl @Inject constructor(
     private val _blocked = MutableStateFlow<SafetyResult.Blocked?>(null)
     private val _readOnly = MutableStateFlow(safety.isReadOnly())
     private val _lastError = MutableStateFlow<String?>(null)
+    private val _autoTest = MutableStateFlow(AutoTestState(steps = AutoTestState.defaultSteps()))
 
     override val connectionState = hub.connectionState
     override val activeTransport = hub.activeType
@@ -61,10 +62,16 @@ class DiagnosticRepositoryImpl @Inject constructor(
     override val lastBlocked = _blocked.asStateFlow()
     override val isReadOnly = _readOnly.asStateFlow()
     override val lastError = _lastError.asStateFlow()
+    override val autoTestState = _autoTest.asStateFlow()
 
     override suspend fun listBluetoothDevices(): List<AdapterDevice> = hub.listBluetoothClassic()
     override suspend fun scanBleDevices(timeoutMs: Long): List<AdapterDevice> = hub.scanBle(timeoutMs)
     override suspend fun listUsbDevices(): List<AdapterDevice> = hub.listUsb()
+    override fun isBluetoothAvailable(): Boolean = hub.isBluetoothAvailable()
+    override fun isBluetoothEnabled(): Boolean = hub.isBluetoothEnabled()
+    override fun resetAutoTestState() {
+        _autoTest.value = AutoTestState(steps = AutoTestState.defaultSteps())
+    }
 
     override suspend fun connect(target: ConnectionTarget) {
         _lastError.value = null
@@ -202,52 +209,244 @@ class DiagnosticRepositoryImpl @Inject constructor(
         return _ecus.value
     }
 
+    override suspend fun runElmInit(): String {
+        requireConnected()
+        step("ELM init", 8f, "ATZ…ATSP0…")
+        return elm.initAdapter()
+    }
+
+    override suspend fun readMode01Live(): List<LivePid> {
+        requireConnected()
+        step("Mode 01", 55f, "Reading live/supported PIDs…")
+        readLiveFromAdapter()
+        // Supported PID bitmask probe
+        runCatching { elm.send("0100", timeoutMs = 4000) }
+        return _pids.value
+    }
+
+    override suspend fun readMode03Dtcs(): List<DtcCode> {
+        requireConnected()
+        step("Mode 03", 62f, "Reading stored DTCs…")
+        val raw = runCatching { elm.send("03", timeoutMs = 5000) }.getOrDefault("")
+        return ObdModes.parseDtcResponse(raw).map { DtcCode(it, "") }
+    }
+
+    override suspend fun readModes06_07_09_0A(): Map<String, String> {
+        requireConnected()
+        step("Modes 06/07/09/0A", 70f, "Reading Mode 06/07/09/0A…")
+        val map = mutableMapOf<String, String>()
+        map["06"] = runCatching { elm.send("06", timeoutMs = 5000) }.getOrElse { it.message ?: "fail" }
+        map["07"] = runCatching { elm.send("07", timeoutMs = 5000) }.getOrElse { it.message ?: "fail" }
+        map["09"] = runCatching { elm.send(ObdModes.mode09Vin(), timeoutMs = 8000) }.getOrElse { it.message ?: "fail" }
+        map["0A"] = runCatching { elm.send("0A", timeoutMs = 5000) }.getOrElse { it.message ?: "fail" }
+        // Update vehicle from VIN if possible
+        runCatching {
+            val vin = ObdModes.parseVin(map["09"].orEmpty())
+            if (vin.length >= 11) {
+                val decoded = if (vin.length == 17) vinDecoder.decode(vin) else VehicleInfo(vin = vin)
+                _vehicle.value = decoded
+            }
+        }
+        return map
+    }
+
     override suspend fun runFullDiagnostic(): DiagnosticSession {
         requireConnected()
         _lastError.value = null
+        runCatching { runElmInit() }
         val caps = runAdapterTest()
         val protocols = runProtocolDiscovery()
-        val vehicle = runCatching { recognizeVehicle() }.getOrElse {
+        runCatching { recognizeVehicle() }.onFailure {
             _lastError.value = it.message
-            VehicleInfo()
         }
+        readMode01Live()
+        runCatching { readMode03Dtcs() }
+        runCatching { readModes06_07_09_0A() }
         val ecus = discoverEcus()
-        step("Live data", 75f, "Reading Mode 01 PIDs…")
-        readLiveFromAdapter()
-        runCatching { elm.send("06") }
-        runCatching { elm.send("07") }
-        runCatching { elm.send("0A") }
         step("Scoring", 90f, "Scoring from real responses…")
         val score = scoreEngine.score(
             caps, protocols, ecus,
-            vinOk = vehicle.vin.length == 17
+            vinOk = _vehicle.value.vin.length == 17
         )
         _score.value = score
         step("Done", 100f, "Diagnostic complete (READ ONLY)")
+        val v = _vehicle.value
         val session = DiagnosticSession(
-            vin = vehicle.vin.ifBlank { "UNKNOWN" },
+            vin = v.vin.ifBlank { "UNKNOWN" },
             adapterType = caps.type,
             protocol = protocols.firstOrNull() ?: ObdProtocol.UNKNOWN,
             score = score,
             ecus = ecus,
-            vehicle = vehicle,
+            vehicle = v,
             aiSummary = "",
             timestamp = System.currentTimeMillis(),
             canSamples = _can.value
         )
+        persistSession(session)
+        return session
+    }
+
+    override suspend fun runAutoTestPipeline(
+        analyzeAi: suspend (DiagnosticSession) -> AiExplanation,
+        savePdf: suspend (DiagnosticSession) -> java.io.File,
+        isCancelled: () -> Boolean
+    ): DiagnosticSession {
+        requireConnected()
+        _lastError.value = null
+        val steps = AutoTestState.defaultSteps().toMutableList()
+        fun publish(
+            running: Boolean = true,
+            finished: Boolean = false,
+            cancelled: Boolean = false,
+            pdfSaved: Boolean = false,
+            pdfName: String? = null,
+            error: String? = null
+        ) {
+            val done = steps.count { it.status == AutoTestStepStatus.SUCCESS || it.status == AutoTestStepStatus.FAILED || it.status == AutoTestStepStatus.SKIPPED }
+            val pct = (done.toFloat() / steps.size.coerceAtLeast(1)) * 100f
+            val current = steps.firstOrNull { it.status == AutoTestStepStatus.RUNNING }?.id
+            _autoTest.value = AutoTestState(
+                running = running,
+                overallPercent = if (finished) 100f else pct,
+                currentStepId = current,
+                steps = steps.toList(),
+                finished = finished,
+                cancelled = cancelled,
+                pdfSaved = pdfSaved,
+                pdfName = pdfName,
+                error = error
+            )
+            val msg = steps.firstOrNull { it.status == AutoTestStepStatus.RUNNING }?.titleHu ?: "AutoTest"
+            step(msg, _autoTest.value.overallPercent, msg)
+        }
+
+        suspend fun runStep(id: String, block: suspend () -> String): Boolean {
+            if (isCancelled()) return false
+            val idx = steps.indexOfFirst { it.id == id }
+            if (idx < 0) return true
+            steps[idx] = steps[idx].copy(status = AutoTestStepStatus.RUNNING, detail = "…")
+            publish()
+            return try {
+                val detail = block()
+                steps[idx] = steps[idx].copy(status = AutoTestStepStatus.SUCCESS, detail = detail.take(120))
+                publish()
+                true
+            } catch (e: Exception) {
+                steps[idx] = steps[idx].copy(
+                    status = AutoTestStepStatus.FAILED,
+                    detail = (e.message ?: e.toString()).take(160)
+                )
+                _lastError.value = e.message
+                publish()
+                // Continue where safe
+                true
+            }
+        }
+
+        publish()
+        if (isCancelled()) {
+            publish(running = false, finished = true, cancelled = true)
+            throw TransportException("AutoTest megszakítva / cancelled")
+        }
+
+        var caps: AdapterCapabilities? = null
+        var protocols: List<ObdProtocol> = emptyList()
+
+        runStep("elm_init") {
+            elm.initAdapter().take(80).ifBlank { "AT init OK" }
+        }
+        runStep("adapter") {
+            caps = runAdapterTest()
+            "${caps!!.type} / ${caps!!.firmware}"
+        }
+        runStep("protocol") {
+            protocols = runProtocolDiscovery()
+            protocols.firstOrNull()?.name ?: "UNKNOWN"
+        }
+        runStep("mode01") {
+            val pids = readMode01Live()
+            "${pids.size} PID"
+        }
+        runStep("mode03") {
+            val dtcs = readMode03Dtcs()
+            "${dtcs.size} DTC"
+        }
+        runStep("modes_extra") {
+            val m = readModes06_07_09_0A()
+            "06/07/09/0A ok (${m.size})"
+        }
+        runStep("ecu") {
+            val ecus = discoverEcus()
+            "online ${ecus.count { it.online }}/${ecus.size}"
+        }
+
+        var score: OverallScore? = null
+        runStep("scoring") {
+            val c = caps ?: AdapterCapabilities(
+                AdapterType.UNKNOWN, "", false, false, false, false, emptyList(), emptyList()
+            )
+            score = scoreEngine.score(
+                c, protocols, _ecus.value,
+                vinOk = _vehicle.value.vin.length == 17
+            )
+            _score.value = score
+            "${"%.0f".format(score!!.totalPercent)}% / ${score!!.stars}★"
+        }
+
+        val baseSession = DiagnosticSession(
+            vin = _vehicle.value.vin.ifBlank { "UNKNOWN" },
+            adapterType = caps?.type ?: _adapter.value,
+            protocol = protocols.firstOrNull() ?: ObdProtocol.UNKNOWN,
+            score = score ?: OverallScore(0f, 0, emptyList()),
+            ecus = _ecus.value,
+            vehicle = _vehicle.value,
+            aiSummary = "",
+            timestamp = System.currentTimeMillis(),
+            canSamples = _can.value
+        )
+
+        var explanation: AiExplanation? = null
+        runStep("ai") {
+            explanation = analyzeAi(baseSession)
+            "provider=${explanation!!.provider}"
+        }
+
+        val withAi = baseSession.copy(
+            aiSummary = explanation?.let { "${it.simple}\n${it.engineering}\n${it.practical}" } ?: "",
+            aiAdvice = explanation?.advice.orEmpty(),
+            aiSummaryHu = explanation?.summaryHu?.ifBlank { explanation?.simple.orEmpty() }.orEmpty()
+        )
+
+        var pdfFile: java.io.File? = null
+        runStep("pdf") {
+            pdfFile = savePdf(withAi)
+            pdfFile!!.name
+        }
+
+        persistSession(withAi)
+        publish(
+            running = false,
+            finished = true,
+            pdfSaved = pdfFile != null,
+            pdfName = pdfFile?.name
+        )
+        step("Done", 100f, "AutoTest kész — PDF: ${pdfFile?.name ?: "—"}")
+        return withAi
+    }
+
+    private suspend fun persistSession(session: DiagnosticSession) {
         sessionDao.insert(
             TestSessionEntity(
                 vin = session.vin,
                 adapterType = session.adapterType.name,
                 protocol = session.protocol.name,
-                totalScore = score.totalPercent,
-                stars = score.stars,
-                aiSummary = "",
+                totalScore = session.score.totalPercent,
+                stars = session.score.stars,
+                aiSummary = session.aiSummary,
                 jsonPayload = Gson().toJson(session),
                 timestamp = session.timestamp
             )
         )
-        return session
     }
 
     override suspend fun tryDangerousCommand(command: String): SafetyResult {
