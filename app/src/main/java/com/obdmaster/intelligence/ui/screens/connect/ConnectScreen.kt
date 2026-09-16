@@ -3,6 +3,7 @@ package com.obdmaster.intelligence.ui.screens.connect
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -40,29 +41,65 @@ fun ConnectScreen(vm: MainViewModel) {
     val btEnabled by vm.bluetoothEnabled.collectAsState()
     val btAvailable by vm.bluetoothAvailable.collectAsState()
     var permissionsGranted by remember { mutableStateOf(false) }
+    var permanentDeny by remember { mutableStateOf(false) }
 
+    /** SDK-aware: 31+ require SCAN+CONNECT; location soft-ask. <31 location required. */
     fun requiredPerms(): Array<String> = buildList {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             add(Manifest.permission.BLUETOOTH_CONNECT)
             add(Manifest.permission.BLUETOOTH_SCAN)
+            add(Manifest.permission.ACCESS_FINE_LOCATION) // soft — Classic discovery stacks
         } else {
             add(Manifest.permission.ACCESS_FINE_LOCATION)
             add(Manifest.permission.ACCESS_COARSE_LOCATION)
         }
     }.toTypedArray()
 
-    fun hasAllPerms(): Boolean = requiredPerms().all {
-        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+    fun hardRequiredOk(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            listOf(
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_SCAN
+            ).all {
+                ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+            }
+        } else {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    fun openAppSettings() {
+        val intent = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.fromParts("package", context.packageName, null)
+        )
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
-        permissionsGranted = result.values.all { it } || hasAllPerms()
-        if (permissionsGranted) {
-            vm.onBluetoothPermissionGranted()
-        } else {
+        val ok = hardRequiredOk()
+        permissionsGranted = ok
+        if (!ok) {
+            val act = context as? android.app.Activity
+            permanentDeny = act != null && requiredPerms().any { perm ->
+                result[perm] == false &&
+                    !androidx.core.app.ActivityCompat.shouldShowRequestPermissionRationale(act, perm)
+            }
             vm.onBluetoothPermissionDenied()
+            if (permanentDeny) openAppSettings()
+        } else {
+            permanentDeny = false
+            vm.onBluetoothPermissionGranted()
         }
     }
 
@@ -74,7 +111,7 @@ fun ConnectScreen(vm: MainViewModel) {
     }
 
     fun ensureBtPermissionThen(action: () -> Unit) {
-        if (hasAllPerms()) {
+        if (hardRequiredOk()) {
             permissionsGranted = true
             action()
         } else {
@@ -85,7 +122,7 @@ fun ConnectScreen(vm: MainViewModel) {
     }
 
     LaunchedEffect(Unit) {
-        permissionsGranted = hasAllPerms()
+        permissionsGranted = hardRequiredOk()
         if (permissionsGranted) {
             vm.refreshBluetoothStatus()
             vm.refreshBluetooth()
@@ -113,20 +150,19 @@ fun ConnectScreen(vm: MainViewModel) {
             )
             if (conn == ConnectionState.CONNECTED) {
                 Button(onClick = { vm.disconnect() }, enabled = !busy) { Text("Disconnect") }
-                Text("Sikeres kapcsolat után az AutoTest automatikusan elindul.")
+                Text("Sikeres kapcsolat + ELM init után az AutoTest automatikusan elindul.")
             }
         }
 
-        SectionCard("Bluetooth Classic (SPP / ELM327)") {
-            Text("Párosítsd az adaptert, vagy keresd Classic discovery-vel.")
+        SectionCard("Bluetooth dual-stack (Classic SPP + BLE UART)") {
             Text(
-                "Párosítás PIN gyakran 1234 vagy 0000.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary
+                "1) Engedélyek → 2) BT BE → 3) Lista (párosított + Classic ~12s + BLE) → " +
+                    "4) Választás → 5) Kapcsolat + ELM init (ATZ 8s, ATH0) → AutoTest"
             )
             Text(
-                "Olcsó ELM327 = Classic SPP, ne BLE. Zárd be a Torque / más OBD appot.",
-                style = MaterialTheme.typography.bodySmall
+                "Párosítás PIN gyakran 1234 vagy 0000. Olcsó ELM327 = Classic SPP. Zárd be a Torque-ot.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary
             )
             if (!btEnabled) {
                 Text(
@@ -136,9 +172,19 @@ fun ConnectScreen(vm: MainViewModel) {
             }
             if (!permissionsGranted) {
                 Text(
-                    "Nincs BT engedély (CONNECT/SCAN). Engedélyezd, majd frissül a lista.",
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        "Nincs BT engedély (SCAN/CONNECT). Engedélyezd, majd frissül a lista."
+                    } else {
+                        "Helymeghatározás kell a Classic kereséshez (Android <12)."
+                    },
                     color = MaterialTheme.colorScheme.error
                 )
+                if (permanentDeny) {
+                    Button(
+                        onClick = { openAppSettings() },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("App beállítások megnyitása / Open settings") }
+                }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(
@@ -159,8 +205,8 @@ fun ConnectScreen(vm: MainViewModel) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    if (discovering) "Keresés… (~12s)"
-                    else "ELM327 keresése (Classic)"
+                    if (discovering) "Keresés… (~12s Classic + BLE)"
+                    else "ELM327 keresése (Classic + BLE ~12s)"
                 )
             }
             if (!btEnabled) {
@@ -174,13 +220,13 @@ fun ConnectScreen(vm: MainViewModel) {
             }
         }
 
-        SectionCard("Bluetooth LE") {
+        SectionCard("Bluetooth LE separately") {
             Button(
                 onClick = { ensureBtPermissionThen { vm.scanBle() } },
                 enabled = !busy
-            ) { Text("Scan BLE OBD (8s)") }
+            ) { Text("Scan BLE OBD (~12s)") }
             Text(
-                "Ha a név OBD/ELM/Vgate és BLE nem megy, az app Classic fallbacket próbál ugyanarra a MAC-re.",
+                "UUID hints: ffe0/fff0/ff00/NUS. Ha OBD/ELM név és BLE nem megy → Classic fallback.",
                 style = MaterialTheme.typography.bodySmall
             )
         }
@@ -203,17 +249,21 @@ fun ConnectScreen(vm: MainViewModel) {
                     when {
                         !btEnabled -> "Nincs eszköz — Bluetooth ki van kapcsolva."
                         !permissionsGranted -> "Nincs eszköz — engedély hiányzik."
-                        else -> "Nincs listázott eszköz. Párosíts / ELM327 keresése (Classic)."
+                        else -> "Nincs listázott eszköz. Párosíts / ELM327 keresése."
                     }
                 )
             }
             devices.forEach { d ->
-                val tip = if (d.transport == TransportType.BLE) {
-                    " · ha nem csatlakozik: Classic fallback (OBD névnél)"
-                } else ""
+                val kind = when {
+                    d.isBle || d.transport == TransportType.BLE -> "BLE"
+                    d.bonded -> "Classic · bonded"
+                    else -> "Classic"
+                }
                 ListItem(
                     headlineContent = { Text(d.name) },
-                    supportingContent = { Text("${d.transport} · ${d.address} ${d.extra}$tip") },
+                    supportingContent = {
+                        Text("$kind · ${d.address} ${d.extra}")
+                    },
                     modifier = Modifier.clickable(enabled = !busy) {
                         ensureBtPermissionThen { vm.connectDevice(d) }
                     }
@@ -246,6 +296,6 @@ fun ConnectScreen(vm: MainViewModel) {
     }
 }
 
-/** Avoid importing BluetoothAdapter in Compose preview issues — request enable via Settings action. */
+/** Request enable via system BT enable intent. */
 private fun BluetoothAdapterEnableIntent(): Intent =
     Intent("android.bluetooth.adapter.action.REQUEST_ENABLE")

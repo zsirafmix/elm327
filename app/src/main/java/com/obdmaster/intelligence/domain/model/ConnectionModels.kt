@@ -5,7 +5,9 @@ data class AdapterDevice(
     val name: String,
     val transport: TransportType,
     val address: String,
-    val extra: String = ""
+    val extra: String = "",
+    val bonded: Boolean = false,
+    val isBle: Boolean = false
 )
 
 data class ConnectionTarget(

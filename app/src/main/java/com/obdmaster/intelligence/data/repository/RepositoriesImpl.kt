@@ -66,7 +66,7 @@ class DiagnosticRepositoryImpl @Inject constructor(
 
     override suspend fun listBluetoothDevices(): List<AdapterDevice> = hub.listBluetoothClassic()
     override suspend fun discoverBluetoothDevices(durationMs: Long): List<AdapterDevice> =
-        hub.discoverBluetoothClassic(durationMs)
+        hub.scanAllBluetooth(durationMs)
     override suspend fun scanBleDevices(timeoutMs: Long): List<AdapterDevice> = hub.scanBle(timeoutMs)
     override suspend fun listUsbDevices(): List<AdapterDevice> = hub.listUsb()
     override fun isBluetoothAvailable(): Boolean = hub.isBluetoothAvailable()

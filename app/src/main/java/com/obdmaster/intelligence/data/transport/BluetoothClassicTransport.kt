@@ -17,17 +17,23 @@ import com.obdmaster.intelligence.domain.model.TransportException
 import com.obdmaster.intelligence.domain.model.TransportType
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.TimeoutCancellationException
-import java.io.BufferedInputStream
+import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -35,15 +41,11 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Classic Bluetooth RFCOMM (SPP) to ELM327 / STN adapters.
+ * Classic Bluetooth RFCOMM (SPP) — Flutter `BluetoothConnection.toAddress` spirit.
  *
- * Attempt matrix (v1.2.1):
- * 1) Prefer BONDED; createBond + wait if needed
- * 2) cancelDiscovery before connect
- * 3) insecure + secure create*RfcommSocketToServiceRecord(SPP)
- * 4) each SDP / cached ParcelUuid that looks like SPP
- * 5) reflection channels 1–30: createInsecureRfcommSocket + createRfcommSocket
- * 6) After socket OK → verifyElm (ATZ/ATI); else try next method
+ * PRIMARY: open socket → continuous InputStream read on dedicated coroutine feeding
+ * [ElmByteStreamSession.onBytes] (NOT available()-only polling).
+ * Fallbacks: insecure SPP → secure SPP → SDP UUIDs → reflection channels 1–30.
  */
 @Singleton
 class BluetoothClassicTransport @Inject constructor(
@@ -57,10 +59,15 @@ class BluetoothClassicTransport @Inject constructor(
     private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _state.asStateFlow()
 
+    val session = ElmByteStreamSession()
+
     private var socket: BluetoothSocket? = null
-    private var input: BufferedInputStream? = null
+    private var input: InputStream? = null
     private var output: OutputStream? = null
-    private val lock = Any()
+    private val ioLock = Any()
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var rxJob: Job? = null
 
     @Volatile
     private var discoveryReceiver: BroadcastReceiver? = null
@@ -69,10 +76,8 @@ class BluetoothClassicTransport @Inject constructor(
         val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
         private const val FIRST_TIMEOUT_MS = 20_000L
         private const val CHANNEL_TIMEOUT_MS = 5_000L
-        private const val VERIFY_TIMEOUT_MS = 4_500L
         private const val BOND_WAIT_MS = 15_000L
         private const val UUID_FETCH_WAIT_MS = 8_000L
-        private const val SETTLE_DELAY_MS = 300L
         private const val BETWEEN_ATTEMPT_DELAY_MS = 350L
         private const val DISCOVERY_DEFAULT_MS = 12_000L
     }
@@ -96,14 +101,15 @@ class BluetoothClassicTransport @Inject constructor(
                 name = it.name ?: it.address,
                 transport = TransportType.BLUETOOTH_CLASSIC,
                 address = it.address,
+                bonded = true,
+                isBle = false,
                 extra = "Párosított / bonded · SPP"
             )
         }.sortedBy { it.name.lowercase() }
     }
 
     /**
-     * Classic inquiry (~12s): discovered + bonded merged. Cancels any prior discovery.
-     * PIN tip is shown in UI (often 1234 / 0000).
+     * Classic inquiry (~12s): discovered + bonded merged.
      */
     @SuppressLint("MissingPermission")
     suspend fun discoverDevices(durationMs: Long = DISCOVERY_DEFAULT_MS): List<AdapterDevice> =
@@ -143,6 +149,8 @@ class BluetoothClassicTransport @Inject constructor(
                                 name = name,
                                 transport = TransportType.BLUETOOTH_CLASSIC,
                                 address = addr,
+                                bonded = bonded,
+                                isBle = false,
                                 extra = if (bonded) {
                                     "Párosított / bonded · Classic"
                                 } else {
@@ -163,6 +171,7 @@ class BluetoothClassicTransport @Inject constructor(
                             val existing = found[addr.uppercase()]
                             if (existing != null && state == BluetoothDevice.BOND_BONDED) {
                                 found[addr.uppercase()] = existing.copy(
+                                    bonded = true,
                                     extra = "Párosított / bonded · Classic"
                                 )
                             }
@@ -191,9 +200,8 @@ class BluetoothClassicTransport @Inject constructor(
                 discoveryReceiver = null
             }
             found.values.sortedWith(
-                compareByDescending<AdapterDevice> {
-                    it.extra.contains("Párosított") || it.extra.contains("bonded")
-                }.thenBy { it.name.lowercase() }
+                compareByDescending<AdapterDevice> { it.bonded }
+                    .thenBy { it.name.lowercase() }
             )
         }
 
@@ -250,19 +258,14 @@ class BluetoothClassicTransport @Inject constructor(
             address
         }
 
-        // Never connect while discovery is running
         stopDiscoveryInternal(bt)
         delay(150)
 
         val errors = mutableListOf<String>()
         val bondOk = ensureBonded(device, BOND_WAIT_MS)
-        if (!bondOk) {
-            errors += "párosítás: nem sikerült createBond / bond timeout (PIN gyakran 1234 vagy 0000)"
-        } else {
-            errors += "párosítás: BONDED OK"
-        }
+        errors += if (bondOk) "párosítás: BONDED OK" else
+            "párosítás: nem sikerült createBond / bond timeout (PIN gyakran 1234 vagy 0000)"
 
-        // Refresh SDP UUIDs (best-effort)
         val sppUuids = collectSppUuids(device)
         errors += "SDP UUID-k: ${sppUuids.joinToString { shortUuid(it) }.ifBlank { "(nincs)" }}"
 
@@ -275,7 +278,8 @@ class BluetoothClassicTransport @Inject constructor(
         )
 
         val attempts = mutableListOf<Attempt>()
-        attempts += Attempt("insecure SPP UUID", FIRST_TIMEOUT_MS) {
+        // PRIMARY path mirrors flutter_bluetooth_serial toAddress (insecure SPP first)
+        attempts += Attempt("insecure SPP UUID (toAddress-like)", FIRST_TIMEOUT_MS) {
             it.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
         }
         attempts += Attempt("secure SPP UUID", FIRST_TIMEOUT_MS) {
@@ -306,26 +310,14 @@ class BluetoothClassicTransport @Inject constructor(
                 val connected = attempt.factory(device)
                 sock = connected
                 connectSocketWithTimeout(connected, attempt.timeoutMs)
-                // Hold streams temporarily for verifyElm
-                synchronized(lock) {
-                    socket = connected
-                    input = BufferedInputStream(connected.inputStream)
-                    output = connected.outputStream
-                }
-                drainInputBuffer()
-                delay(SETTLE_DELAY_MS)
-                if (!verifyElm(VERIFY_TIMEOUT_MS)) {
-                    errors += "${attempt.label}: socket OK, de nincs ELM válasz (ATZ/ATI)"
-                    closeCurrentSocketQuiet()
-                    sock = null
-                    delay(BETWEEN_ATTEMPT_DELAY_MS)
-                    continue
-                }
+                // Socket OK → attach continuous RX listener (Flutter input.listen spirit)
+                bindSocketAndStartRx(connected)
                 _state.value = ConnectionState.CONNECTED
+                errors += "${attempt.label}: socket + continuous RX OK"
                 return@withContext true
             } catch (e: Exception) {
                 runCatching { sock?.close() }
-                closeCurrentSocketQuiet()
+                stopRxAndCloseQuiet()
                 val detail = when (e) {
                     is TimeoutCancellationException -> "timeout ${attempt.timeoutMs}ms"
                     else -> e.message ?: e.javaClass.simpleName
@@ -335,47 +327,85 @@ class BluetoothClassicTransport @Inject constructor(
             }
         }
 
-        closeCurrentSocketQuiet()
+        stopRxAndCloseQuiet()
         _state.value = ConnectionState.ERROR
         throw TransportException(
             buildString {
                 append("Bluetooth Classic csatlakozás sikertelen ($address / $displayName).\n")
                 append("Próbák / attempt log:\n")
                 append(errors.joinToString("\n"))
-                append("\nTipp: párosítsd előbb (PIN 1234 vagy 0000), zárd be a Torque/más OBD appot, legyél közel az adapterhez.")
+                append(
+                    "\nTipp: párosítsd előbb (PIN 1234 vagy 0000), zárd be a Torque/más OBD appot, " +
+                        "legyél közel az adapterhez."
+                )
             }
         )
     }
 
+    private fun bindSocketAndStartRx(connected: BluetoothSocket) {
+        synchronized(ioLock) {
+            socket = connected
+            input = connected.inputStream
+            output = connected.outputStream
+        }
+        session.attach { bytes ->
+            val out = synchronized(ioLock) { output }
+                ?: throw TransportException("Nincs kapcsolat (BT Classic) / Not connected")
+            synchronized(ioLock) {
+                out.write(bytes)
+                out.flush()
+            }
+        }
+        session.onLinkLost = {
+            _state.value = ConnectionState.DISCONNECTED
+        }
+        startContinuousRx()
+    }
+
     /**
-     * Quick ATZ then ATI smoke. Returns true if adapter talks (prompt / ELM / STN / OBD).
+     * CRITICAL: continuous InputStream.read() on dedicated coroutine —
+     * mirrors Flutter `input.listen`, NOT available()-only polling.
      */
-    suspend fun verifyElm(timeoutMs: Long = VERIFY_TIMEOUT_MS): Boolean {
-        return try {
-            drainInputBuffer()
-            delay(80)
-            write("ATZ")
-            val r1 = readUntilPromptQuiet(timeoutMs)
-            if (looksLikeElm(r1)) return true
-            drainInputBuffer()
-            delay(80)
-            write("ATI")
-            val r2 = readUntilPromptQuiet(timeoutMs)
-            looksLikeElm(r2)
-        } catch (_: Exception) {
-            false
+    private fun startContinuousRx() {
+        rxJob?.cancel()
+        val inp = synchronized(ioLock) { input } ?: return
+        rxJob = scope.launch {
+            val buf = ByteArray(1024)
+            try {
+                while (isActive) {
+                    val n = try {
+                        inp.read(buf)
+                    } catch (_: Exception) {
+                        -1
+                    }
+                    if (n < 0) {
+                        session.notifyLinkLost("Bluetooth kapcsolat bontva az adapter által")
+                        _state.value = ConnectionState.DISCONNECTED
+                        break
+                    }
+                    if (n > 0) {
+                        session.onBytes(buf.copyOf(n))
+                    }
+                }
+            } catch (_: Exception) {
+                session.notifyLinkLost("BT I/O hiba")
+                _state.value = ConnectionState.DISCONNECTED
+            }
         }
     }
 
-    private fun looksLikeElm(resp: String): Boolean {
-        if (resp.isBlank()) return false
-        val u = resp.uppercase()
-        return resp.contains('>') ||
-            u.contains("ELM") ||
-            u.contains("STN") ||
-            u.contains("OBD") ||
-            u.contains("VLINK") ||
-            u.contains("OBDLINK")
+    private suspend fun stopRxAndCloseQuiet() {
+        rxJob?.cancel()
+        rxJob = null
+        session.detach()
+        synchronized(ioLock) {
+            runCatching { input?.close() }
+            runCatching { output?.close() }
+            runCatching { socket?.close() }
+            input = null
+            output = null
+            socket = null
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -409,7 +439,6 @@ class BluetoothClassicTransport @Inject constructor(
                     false
                 }
                 if (!started) {
-                    // May already be bonding
                     delay(200)
                     if (device.bondState == BluetoothDevice.BOND_BONDED) return@withContext true
                 }
@@ -478,8 +507,7 @@ class BluetoothClassicTransport @Inject constructor(
             s.contains("1101-0000-1000-8000")
     }
 
-    private fun shortUuid(u: UUID): String =
-        u.toString().take(8)
+    private fun shortUuid(u: UUID): String = u.toString().take(8)
 
     private fun createReflectionSocket(
         device: BluetoothDevice,
@@ -491,7 +519,6 @@ class BluetoothClassicTransport @Inject constructor(
             val m = device.javaClass.getMethod(methodName, Int::class.javaPrimitiveType)
             m.invoke(device, channel) as BluetoothSocket
         } catch (e: NoSuchMethodException) {
-            // Fall back to secure-named method if insecure missing
             if (insecure) {
                 val m = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
                 m.invoke(device, channel) as BluetoothSocket
@@ -503,9 +530,7 @@ class BluetoothClassicTransport @Inject constructor(
 
     private suspend fun connectSocketWithTimeout(sock: BluetoothSocket, timeoutMs: Long) {
         withContext(Dispatchers.IO) {
-            val job = async {
-                sock.connect()
-            }
+            val job = async { sock.connect() }
             try {
                 withTimeout(timeoutMs) { job.await() }
             } catch (e: TimeoutCancellationException) {
@@ -519,8 +544,12 @@ class BluetoothClassicTransport @Inject constructor(
         }
     }
 
-    private fun closeCurrentSocketQuiet() {
-        synchronized(lock) {
+    override suspend fun disconnect() = withContext(Dispatchers.IO) {
+        cancelDiscovery()
+        rxJob?.cancelAndJoin()
+        rxJob = null
+        session.detach()
+        synchronized(ioLock) {
             runCatching { input?.close() }
             runCatching { output?.close() }
             runCatching { socket?.close() }
@@ -528,80 +557,32 @@ class BluetoothClassicTransport @Inject constructor(
             output = null
             socket = null
         }
-    }
-
-    private fun drainInputBuffer() {
-        runCatching {
-            val inp = input ?: return
-            var guard = 0
-            while (inp.available() > 0 && guard++ < 4096) {
-                inp.read()
-            }
-        }
-    }
-
-    private suspend fun readUntilPromptQuiet(timeoutMs: Long): String = withContext(Dispatchers.IO) {
-        val inp = input ?: return@withContext ""
-        val buf = StringBuilder()
-        val deadline = System.currentTimeMillis() + timeoutMs
-        val tmp = ByteArray(256)
-        while (System.currentTimeMillis() < deadline) {
-            val available = inp.available()
-            if (available > 0) {
-                val n = inp.read(tmp, 0, minOf(available, tmp.size))
-                if (n > 0) {
-                    buf.append(String(tmp, 0, n, Charsets.US_ASCII))
-                    if (buf.contains('>')) break
-                }
-            } else {
-                Thread.sleep(20)
-            }
-        }
-        buf.toString()
-    }
-
-    override suspend fun disconnect() = withContext(Dispatchers.IO) {
-        cancelDiscovery()
-        closeCurrentSocketQuiet()
         _state.value = ConnectionState.DISCONNECTED
     }
 
-    override suspend fun write(data: String) = withContext(Dispatchers.IO) {
-        val out = output ?: throw TransportException("Nincs kapcsolat (BT Classic) / Not connected")
+    override suspend fun write(data: String) {
+        if (!session.isAttached) throw TransportException("Nincs kapcsolat (BT Classic) / Not connected")
+        // Prefer session path (adds \r); raw write for callers that bypass transact
+        val out = synchronized(ioLock) { output }
+            ?: throw TransportException("Nincs kapcsolat (BT Classic) / Not connected")
         val payload = if (data.endsWith("\r")) data else "$data\r"
-        synchronized(lock) {
+        synchronized(ioLock) {
             out.write(payload.toByteArray(Charsets.US_ASCII))
             out.flush()
         }
     }
 
-    override suspend fun readUntilPrompt(timeoutMs: Long): String = withContext(Dispatchers.IO) {
-        val inp = input ?: throw TransportException("Nincs kapcsolat (BT Classic) / Not connected")
-        val buf = StringBuilder()
-        val deadline = System.currentTimeMillis() + timeoutMs
-        val tmp = ByteArray(256)
-        while (System.currentTimeMillis() < deadline) {
-            val available = inp.available()
-            if (available > 0) {
-                val n = inp.read(tmp, 0, minOf(available, tmp.size))
-                if (n > 0) {
-                    buf.append(String(tmp, 0, n, Charsets.US_ASCII))
-                    if (buf.contains('>')) break
-                }
-            } else {
-                Thread.sleep(20)
-            }
-        }
-        val result = buf.toString()
-        if (result.isBlank()) {
-            throw TransportException("BT Classic olvasási időtúllépés / read timeout (${timeoutMs}ms)")
-        }
-        result
+    override suspend fun readUntilPrompt(timeoutMs: Long): String {
+        // Drain via session wait for prompt without sending — not typical; use empty wait
+        throw TransportException(
+            "Use transact()/session.sendCommand — continuous RX feeds shared `>` prompt layer"
+        )
     }
 
     override suspend fun transact(command: String, timeoutMs: Long): String {
-        drainInputBuffer()
-        write(command)
-        return readUntilPrompt(timeoutMs)
+        if (!session.isAttached || _state.value != ConnectionState.CONNECTED) {
+            throw TransportException("Nincs kapcsolat (BT Classic) / Not connected")
+        }
+        return session.transactOrThrow(command, timeoutMs)
     }
 }

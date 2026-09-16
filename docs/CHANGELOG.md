@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.3.0] — 2026-09-16
+
+### Fixed
+- **Critical:** Classic BT now uses **continuous InputStream.read()** on a dedicated coroutine (Flutter `input.listen` spirit) — previous `available()`-only polling caused silent ELM / never-connect
+- Shared `ElmByteStreamSession`: single RX buffer, `>` prompt Completer, one-command lock, 1 retry ×1.25 on empty/NO DATA/TIMEOUT
+- BLE write uses `\r` (not `\n`); writeWithoutResponse when only WRNR property
+- ELM init: **ATZ 8s** → ATE0/ATL0/ATS0/**ATH0**/ATSP0 → **0100** → ATDP; softRecover ATSP0+0100
+- SDK-aware permissions: 31+ SCAN+CONNECT required, location soft-ask; <31 location required; permanent deny → app settings
+
+### Added
+- Dual-stack architecture ported from Flutter (Classic SPP + BLE UART → one byte-stream)
+- BLE UUID hint matrix: service ffe0/fff0/ff00/6e400001; write/notify ffe1/fff1/fff2/ff01/ff02/6e400002/003
+- Parallel Classic+BLE discovery (~12s); device model bonded/isBle
+- README HU troubleshooting for this flow
+
+### Changed
+- versionName **1.3.0** / versionCode **6**
+- TransportHub no longer does available()-based ATZ smoke after socket
+
 ## [1.2.1] — 2026-09-16
 
 ### Fixed

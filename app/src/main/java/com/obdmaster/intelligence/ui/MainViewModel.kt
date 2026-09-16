@@ -170,13 +170,13 @@ class MainViewModel @Inject constructor(
             return@launch
         }
         _message.value =
-            "ELM327 Classic keresés (~12s)… Párosítás PIN gyakran 1234 vagy 0000."
+            "ELM327 Classic+BLE keresés (~12s)… PIN gyakran 1234 vagy 0000."
         runCatching { _devices.value = diagnostic.discoverBluetoothDevices(12_000) }
             .onSuccess {
                 _message.value = if (_devices.value.isEmpty()) {
-                    "Nem talált Classic eszközt. Kapcsold be az adaptert, legyél közel, PIN 1234/0000."
+                    "Nem talált eszközt. Kapcsold be az adaptert, legyél közel, PIN 1234/0000."
                 } else {
-                    "${_devices.value.size} Classic eszköz (párosított + felfedezett)"
+                    "${_devices.value.size} eszköz (Classic + BLE, párosított + felfedezett)"
                 }
             }
             .onFailure {
@@ -195,8 +195,8 @@ class MainViewModel @Inject constructor(
             _busy.value = false
             return@launch
         }
-        _message.value = "BLE scan (≈8s)… Olcsó ELM327-hez használd a Classic keresést, ne BLE-t."
-        runCatching { _devices.value = diagnostic.scanBleDevices() }
+        _message.value = "BLE scan (~12s)… UUID hints ffe0/fff0/NUS. Olcsó ELM = Classic SPP."
+        runCatching { _devices.value = diagnostic.scanBleDevices(12_000) }
             .onFailure { _message.value = it.message }
         _busy.value = false
     }

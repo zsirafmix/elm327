@@ -6,7 +6,6 @@ import com.obdmaster.intelligence.domain.model.ConnectionTarget
 import com.obdmaster.intelligence.domain.model.NotConnectedException
 import com.obdmaster.intelligence.domain.model.TransportException
 import com.obdmaster.intelligence.domain.model.TransportType
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,7 +13,9 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Selects and owns the active real transport. No mock in the product path.
+ * Selects and owns the active real transport.
+ * BT Classic + BLE share [ElmByteStreamSession] `>` prompt protocol.
+ * No mock in the product path.
  */
 @Singleton
 class TransportHub @Inject constructor(
@@ -51,14 +52,42 @@ class TransportHub @Inject constructor(
 
     fun cancelBluetoothDiscovery() = bluetoothClassic.cancelDiscovery()
 
-    suspend fun scanBle(timeoutMs: Long = 8000): List<AdapterDevice> = ble.scan(timeoutMs)
+    /**
+     * Bonded + Classic discovery then BLE scan (sequential — Classic inquiry
+     * conflicts with BLE scan on many devices). Total ≈ [durationMs].
+     */
+    suspend fun scanAllBluetooth(durationMs: Long = 12_000): List<AdapterDevice> {
+        val classicMs = (durationMs * 2 / 3).coerceAtLeast(7_000L)
+        val bleMs = (durationMs - classicMs).coerceAtLeast(4_000L)
+        val classic = runCatching { bluetoothClassic.discoverDevices(classicMs) }
+            .getOrDefault(emptyList())
+        // Ensure Classic inquiry stopped before BLE
+        runCatching { bluetoothClassic.cancelDiscovery() }
+        val bleDevs = runCatching { ble.scan(bleMs) }.getOrDefault(emptyList())
+        val merged = LinkedHashMap<String, AdapterDevice>()
+        classic.forEach { merged["C:${it.address.uppercase()}"] = it }
+        bleDevs.forEach { d ->
+            val cKey = "C:${d.address.uppercase()}"
+            if (merged.containsKey(cKey)) {
+                val c = merged[cKey]!!
+                merged[cKey] = c.copy(extra = c.extra + " · +BLE")
+            } else {
+                merged["B:${d.address.uppercase()}"] = d
+            }
+        }
+        return merged.values.sortedWith(
+            compareByDescending<AdapterDevice> { it.bonded }
+                .thenBy { it.name.lowercase() }
+        )
+    }
+
+    suspend fun scanBle(timeoutMs: Long = 12_000): List<AdapterDevice> = ble.scan(timeoutMs)
 
     suspend fun listUsb(): List<AdapterDevice> = usb.listDevices()
 
     suspend fun connect(target: ConnectionTarget) {
         disconnect()
         _state.value = ConnectionState.CONNECTING
-        // Never hold Classic discovery during RFCOMM connect
         runCatching { bluetoothClassic.cancelDiscovery() }
 
         val transport = when (target.transport) {
@@ -91,43 +120,12 @@ class TransportHub @Inject constructor(
             )
         }
 
-        // Classic post-connect ELM smoke before exposing CONNECTED to UI / AutoTest
-        if (target.transport == TransportType.BLUETOOTH_CLASSIC) {
-            delay(400)
-            val smokeOk = try {
-                val ati = transport.transact("ATI", 4_000)
-                if (looksLikeElm(ati)) true
-                else looksLikeElm(transport.transact("ATZ", 5_000))
-            } catch (_: Exception) {
-                false
-            }
-            if (!smokeOk) {
-                runCatching { transport.disconnect() }
-                active = null
-                _activeType.value = null
-                _activeName.value = "—"
-                _state.value = ConnectionState.ERROR
-                throw TransportException(
-                    "Socket OK de az adapter nem válaszol (ATZ). Próbáld újra / másik csatorna."
-                )
-            }
-        }
-
+        // Link OK — ELM init (ATZ/ATH0/…) is done by Elm327CommandLayer / repository.
+        // Do NOT smoke-test with available()-polling here.
         active = transport
         _activeType.value = target.transport
         _activeName.value = target.displayName
         _state.value = ConnectionState.CONNECTED
-    }
-
-    private fun looksLikeElm(resp: String): Boolean {
-        if (resp.isBlank()) return false
-        val u = resp.uppercase()
-        return resp.contains('>') ||
-            u.contains("ELM") ||
-            u.contains("STN") ||
-            u.contains("OBD") ||
-            u.contains("VLINK") ||
-            u.contains("OBDLINK")
     }
 
     suspend fun disconnect() {
@@ -141,4 +139,19 @@ class TransportHub @Inject constructor(
 
     suspend fun transact(command: String, timeoutMs: Long = 5000): String =
         requireTransport().transact(command, timeoutMs)
+
+    /**
+     * Flutter-style tolerant command: returns TIMEOUT/NO DATA text instead of always throwing.
+     * Used by ELM init (ATZ 8s + retry). WiFi/USB fall back to strict transact.
+     */
+    suspend fun transactTolerant(command: String, timeoutMs: Long = 5000): String {
+        val t = requireTransport()
+        return when (t) {
+            is BluetoothClassicTransport ->
+                t.session.sendCommandTolerant(command.trim(), timeoutMs)
+            is BleTransport ->
+                t.session.sendCommandTolerant(command.trim(), timeoutMs)
+            else -> t.transact(command.trim(), timeoutMs)
+        }
+    }
 }
