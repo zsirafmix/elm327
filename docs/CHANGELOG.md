@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.2.1] — 2026-09-16
+
+### Fixed
+- Bluetooth Classic reliability: prefer BONDED / createBond+wait; SDP `fetchUuidsWithSdp` + SPP-like UUIDs
+- Reflection RFCOMM channels **1–30** both insecure + secure; 20s timeout on first UUID attempts
+- `verifyElm()` ATZ/ATI smoke after socket — catches “connected but not talking”; try next method
+- TransportHub post-connect ATI/ATZ gate before CONNECTED; clear HU error if silent
+- cancelDiscovery before every connect; close socket between attempts; HU attempt log in exception/UI
+- BLE→Classic auto-fallback when device name looks like OBD/ELM/Vgate/OBDLink
+
+### Added
+- Classic discovery (~12s): discovered + bonded in Connect list; button **ELM327 keresése (Classic)**
+- Help: párosítás PIN gyakran 1234 vagy 0000; scrollable attempt log
+- README troubleshooting (pair first, Classic not BLE, close Torque, retry near adapter)
+
+### Changed
+- versionName 1.2.1 / versionCode 5
+
+
 ## [1.2.0] — 2026-09-15
 
 ### Fixed

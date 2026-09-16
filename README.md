@@ -14,7 +14,7 @@ Professzionális Android diagnosztikai alkalmazás **valós** OBD adapter kapcso
 
 ## Funkciók
 
-- **Kapcsolat:** Bluetooth Classic (SPP: insecure→secure→reflection), BLE scan, WiFi TCP, USB OTG
+- **Kapcsolat:** Bluetooth Classic (bond + SDP UUID + insecure/secure SPP + reflection ch1–30 + ATZ smoke), Classic discovery, BLE scan, WiFi TCP, USB OTG
 - **AutoTest:** sikeres kapcsolat után automatikus teljes READ ONLY teszt + progress UI + PDF auto-save
 - Műszerfal élő állapottal, pontszámokkal, ECU térképpel (csak probe eredmények); egyéni tesztek megmaradtak
 - OBD Mode 01/03/06/07/09/0A olvasás; Mode 04/08 és veszélyes UDS **blokkolva**
@@ -26,12 +26,23 @@ Professzionális Android diagnosztikai alkalmazás **valós** OBD adapter kapcso
 1. Telepítse az APK-t Android 10+ eszközre  
 2. Nyissa a **Kapcsolat / Connect** képernyőt, engedélyezze a Bluetooth / hely engedélyeket  
 3. Válasszon:
-   - **BT Classic:** párosítsa az ELM327-et a rendszerbeállításokban → List bonded → koppintson
+   - **BT Classic:** párosítsa (PIN 1234/0000) vagy **ELM327 keresése (Classic)** → koppintson
    - **BLE:** Scan BLE OBD → koppintson
    - **WiFi:** csatlakozzon az adapter AP-hoz → host/port → Connect WiFi
    - **USB:** OTG kábel → List USB → engedély → koppintson  
 4. Sikeres kapcsolat után az **Auto teszt** automatikusan elindul (vagy menü → Auto teszt)
 5. Kézi: Dashboard / Adapter / Protocol / … egyéni tesztek továbbra is elérhetők
+
+
+## Bluetooth hibaelhárítás (ELM327)
+
+1. **Párosítsd előbb** a rendszer Bluetooth beállításaiban — PIN gyakran **1234** vagy **0000**
+2. Olcsó klónokhoz használd a **Classic** utat / „ELM327 keresése (Classic)”, **ne BLE**-t
+3. Zárd be a **Torque** / Car Scanner / más OBD appot (egy RFCOMM kliens)
+4. Legyél **közel** az adapterhez; gyújtás be (OBD táp)
+5. Engedélyezd a **BLUETOOTH_CONNECT / SCAN** engedélyeket
+6. Ha „Socket OK de az adapter nem válaszol (ATZ)” → próbáld újra / másik telefon / másik csatorna (az app végigpróbálja)
+7. A csatlakozási napló (attempt log) mutatja, melyik socket módszer bukott el
 
 ## Biztonság
 
@@ -74,7 +85,18 @@ Production-oriented OBD diagnostic tester for Android. **No mock/demo data on th
 
 ### Connect
 
-Use the **Connect** screen: bonded SPP devices (robust Classic connect), BLE scan, WiFi host:port, or USB OTG. After connect, **AutoTest** runs the full READ ONLY pipeline and saves a PDF.
+Use the **Connect** screen: Classic discovery + bonded SPP (robust connect matrix + ATZ smoke), BLE scan (with Classic fallback for OBD-like names), WiFi host:port, or USB OTG. After connect, **AutoTest** runs the full READ ONLY pipeline and saves a PDF.
+
+
+### Bluetooth troubleshooting (ELM327)
+
+1. **Pair first** in Android Bluetooth settings — PIN often **1234** or **0000**
+2. Cheap clones need **Classic SPP**, not BLE — use **ELM327 keresése (Classic)**
+3. Close **Torque** / other OBD apps before connecting
+4. Stay near the adapter; ignition on for OBD power
+5. Grant **BLUETOOTH_CONNECT / SCAN**
+6. If you see “Socket OK but adapter does not answer (ATZ)” → retry; the app walks channels/UUIDs
+7. Check the on-screen attempt log for the full trail
 
 ### Build
 

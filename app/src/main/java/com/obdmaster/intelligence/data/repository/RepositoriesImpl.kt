@@ -65,6 +65,8 @@ class DiagnosticRepositoryImpl @Inject constructor(
     override val autoTestState = _autoTest.asStateFlow()
 
     override suspend fun listBluetoothDevices(): List<AdapterDevice> = hub.listBluetoothClassic()
+    override suspend fun discoverBluetoothDevices(durationMs: Long): List<AdapterDevice> =
+        hub.discoverBluetoothClassic(durationMs)
     override suspend fun scanBleDevices(timeoutMs: Long): List<AdapterDevice> = hub.scanBle(timeoutMs)
     override suspend fun listUsbDevices(): List<AdapterDevice> = hub.listUsb()
     override fun isBluetoothAvailable(): Boolean = hub.isBluetoothAvailable()
@@ -78,12 +80,28 @@ class DiagnosticRepositoryImpl @Inject constructor(
         try {
             hub.connect(target)
             step("Init", 5f, "Initializing ELM AT sequence…")
-            elm.initAdapter()
+            try {
+                elm.initAdapter()
+            } catch (e: Exception) {
+                runCatching { hub.disconnect() }
+                val msg = if (target.transport == TransportType.BLUETOOTH_CLASSIC) {
+                    "Socket OK de az adapter nem válaszol (ATZ). Próbáld újra / másik csatorna.\n" +
+                        (e.message ?: "")
+                } else {
+                    e.message ?: e.toString()
+                }
+                _lastError.value = msg
+                _progress.value = TestProgress("Error", 0f, msg)
+                throw TransportException(msg, e)
+            }
             val id = runCatching { elm.identify() }.getOrDefault("")
             _adapter.value = detectType(id)
             step("Connected", 10f, "Connected: ${target.displayName}")
         } catch (e: Exception) {
-            _lastError.value = e.message ?: e.toString()
+            runCatching { if (hub.isConnected()) hub.disconnect() }
+            if (_lastError.value == null) {
+                _lastError.value = e.message ?: e.toString()
+            }
             _progress.value = TestProgress("Error", 0f, _lastError.value ?: "Connection failed")
             throw e
         }

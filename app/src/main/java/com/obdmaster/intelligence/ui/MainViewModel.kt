@@ -67,6 +67,10 @@ class MainViewModel @Inject constructor(
     val wifiPort = _wifiPort.asStateFlow()
     private val _busy = MutableStateFlow(false)
     val busy = _busy.asStateFlow()
+    private val _connectAttemptLog = MutableStateFlow<String?>(null)
+    val connectAttemptLog = _connectAttemptLog.asStateFlow()
+    private val _discovering = MutableStateFlow(false)
+    val discovering = _discovering.asStateFlow()
     private val _aiKeyPresence = MutableStateFlow(aiRepo.keyPresence())
     val aiKeyPresence = _aiKeyPresence.asStateFlow()
     private val _btAvailable = MutableStateFlow(diagnostic.isBluetoothAvailable())
@@ -98,8 +102,26 @@ class MainViewModel @Inject constructor(
         _btEnabled.value = diagnostic.isBluetoothEnabled()
     }
 
+    fun clearConnectError() {
+        _connectAttemptLog.value = null
+        _message.value = null
+    }
+
+    fun onBluetoothPermissionDenied() {
+        _devices.value = emptyList()
+        _connectAttemptLog.value = null
+        _message.value =
+            "Bluetooth engedély hiányzik (BLUETOOTH_CONNECT/SCAN). Engedélyezd a Beállításokban, majd frissíts."
+    }
+
+    fun onBluetoothPermissionGranted() {
+        refreshBluetoothStatus()
+        refreshBluetooth()
+    }
+
     fun refreshBluetooth() = viewModelScope.launch {
         _busy.value = true
+        _connectAttemptLog.value = null
         refreshBluetoothStatus()
         when {
             !_btAvailable.value -> {
@@ -107,7 +129,7 @@ class MainViewModel @Inject constructor(
                 _devices.value = emptyList()
             }
             !_btEnabled.value -> {
-                _message.value = "A Bluetooth ki van kapcsolva. Kapcsold be, majd List bonded."
+                _message.value = "A Bluetooth ki van kapcsolva. Kapcsold be, majd List bonded / keresés."
                 _devices.value = emptyList()
             }
             else -> {
@@ -115,17 +137,53 @@ class MainViewModel @Inject constructor(
                 runCatching { _devices.value = diagnostic.listBluetoothDevices() }
                     .onSuccess {
                         _message.value = if (_devices.value.isEmpty()) {
-                            "Nincs párosított eszköz. Párosítsd az ELM327-et a rendszer BT beállításaiban."
+                            "Nincs párosított eszköz. Használd: ELM327 keresése (Classic), PIN gyakran 1234 vagy 0000."
                         } else {
                             "${_devices.value.size} párosított eszköz"
                         }
                     }
                     .onFailure {
                         _message.value = it.message
-                        // Surface real exception to lastError path via message
+                        _connectAttemptLog.value = it.message
                     }
             }
         }
+        _busy.value = false
+    }
+
+    /** Classic inquiry ~12s — discovered + bonded. */
+    fun discoverClassic() = viewModelScope.launch {
+        _busy.value = true
+        _discovering.value = true
+        _connectAttemptLog.value = null
+        refreshBluetoothStatus()
+        if (!_btAvailable.value) {
+            _message.value = "Bluetooth hardver nem elérhető."
+            _busy.value = false
+            _discovering.value = false
+            return@launch
+        }
+        if (!_btEnabled.value) {
+            _message.value = "A Bluetooth ki van kapcsolva — Classic keresés nem indítható."
+            _busy.value = false
+            _discovering.value = false
+            return@launch
+        }
+        _message.value =
+            "ELM327 Classic keresés (~12s)… Párosítás PIN gyakran 1234 vagy 0000."
+        runCatching { _devices.value = diagnostic.discoverBluetoothDevices(12_000) }
+            .onSuccess {
+                _message.value = if (_devices.value.isEmpty()) {
+                    "Nem talált Classic eszközt. Kapcsold be az adaptert, legyél közel, PIN 1234/0000."
+                } else {
+                    "${_devices.value.size} Classic eszköz (párosított + felfedezett)"
+                }
+            }
+            .onFailure {
+                _message.value = it.message
+                _connectAttemptLog.value = it.message
+            }
+        _discovering.value = false
         _busy.value = false
     }
 
@@ -137,7 +195,7 @@ class MainViewModel @Inject constructor(
             _busy.value = false
             return@launch
         }
-        _message.value = "BLE scan (≈8s)… Ha Classic SPP adapter, használd a Classic listát."
+        _message.value = "BLE scan (≈8s)… Olcsó ELM327-hez használd a Classic keresést, ne BLE-t."
         runCatching { _devices.value = diagnostic.scanBleDevices() }
             .onFailure { _message.value = it.message }
         _busy.value = false
@@ -152,12 +210,13 @@ class MainViewModel @Inject constructor(
 
     fun connectDevice(device: AdapterDevice) = viewModelScope.launch {
         _busy.value = true
+        _connectAttemptLog.value = null
         _message.value = "Csatlakozás: ${device.name}…"
         if (device.transport == TransportType.BLE) {
             _message.value =
-                "BLE csatlakozás: ${device.name}… (ha sikertelen, próbáld Classic párosított listán)"
+                "BLE csatlakozás: ${device.name}… (ha sikertelen és OBD/ELM név, Classic fallback)"
         }
-        runCatching {
+        val primary = runCatching {
             diagnostic.connect(
                 ConnectionTarget(
                     transport = device.transport,
@@ -165,18 +224,54 @@ class MainViewModel @Inject constructor(
                     displayName = device.name
                 )
             )
-        }.onSuccess {
+        }
+        if (primary.isSuccess) {
             _message.value = "Kapcsolódva: ${device.name} — AutoTest indul…"
             _busy.value = false
             _navigateToAutoTest.tryEmit(Unit)
             startAutoTest()
             return@launch
-        }.onFailure {
-            // Surface real exception message (incl. insecure/secure/reflection attempts)
-            val detail = it.message ?: it.toString()
-            _message.value = detail
         }
+
+        val primaryErr = primary.exceptionOrNull()
+        var detail = primaryErr?.message ?: primaryErr?.toString() ?: "Csatlakozás sikertelen"
+
+        // Auto-fallback: OBD-like name on BLE path → try Classic same MAC
+        if (device.transport == TransportType.BLE && looksLikeObdAdapterName(device.name)) {
+            _message.value =
+                "BLE sikertelen — Classic fallback ugyanarra a MAC-re (${device.address})…"
+            val fallback = runCatching {
+                diagnostic.connect(
+                    ConnectionTarget(
+                        transport = TransportType.BLUETOOTH_CLASSIC,
+                        address = device.address,
+                        displayName = device.name + " (Classic)"
+                    )
+                )
+            }
+            if (fallback.isSuccess) {
+                _message.value = "Kapcsolódva Classic fallback: ${device.name} — AutoTest indul…"
+                _busy.value = false
+                _navigateToAutoTest.tryEmit(Unit)
+                startAutoTest()
+                return@launch
+            }
+            val fbErr = fallback.exceptionOrNull()?.message ?: fallback.exceptionOrNull()?.toString()
+            detail = "BLE hiba:\n" + detail + "\n\nClassic fallback hiba:\n" +
+                (fbErr ?: "ismeretlen")
+        }
+
+        _message.value = detail
+        _connectAttemptLog.value = detail
         _busy.value = false
+    }
+
+    private fun looksLikeObdAdapterName(name: String): Boolean {
+        val n = name.lowercase()
+        return listOf(
+            "obd", "elm", "vgate", "obdlink", "vlinker", "obdii", "obd2",
+            "konnwei", "veepeak", "carista", "baftor", "lexivon", "scantool"
+        ).any { n.contains(it) }
     }
 
     fun connectWifi() = viewModelScope.launch {

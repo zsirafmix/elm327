@@ -22,6 +22,7 @@ interface DiagnosticRepository {
     val autoTestState: StateFlow<AutoTestState>
 
     suspend fun listBluetoothDevices(): List<AdapterDevice>
+    suspend fun discoverBluetoothDevices(durationMs: Long = 12_000): List<AdapterDevice>
     suspend fun scanBleDevices(timeoutMs: Long = 8000): List<AdapterDevice>
     suspend fun listUsbDevices(): List<AdapterDevice>
     fun isBluetoothAvailable(): Boolean
