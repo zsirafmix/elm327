@@ -8,7 +8,7 @@ Professzionális Android diagnosztikai alkalmazás **valós** OBD adapter kapcso
 > **Nincs demo/mock adat a termékútvonalon.** Élő teszt = élő adapter. Hardver szükséges.
 
 **Repo:** https://github.com/zsirafmix/elm327  
-**Package:** `com.obdmaster.intelligence` · minSdk 29 · targetSdk 34 · **v1.3.0**
+**Package:** `com.obdmaster.intelligence` · minSdk 29 · targetSdk 34 · **v1.3.1**
 
 ---
 
@@ -36,6 +36,7 @@ Professzionális Android diagnosztikai alkalmazás **valós** OBD adapter kapcso
 4. Olcsó klónok: **Classic SPP**, ne csak BLE — „ELM327 keresése (Classic + BLE)”  
 5. Zárd be a **Torque** / más OBD appot (egy RFCOMM kliens)  
 6. Legyél **közel**; gyújtás be (OBD táp)  
+8. v1.3.1: Classic **toAddress** path (SPP 20s×2 + ch1) — no more channels 1–30 marathon; shared session + INITIALIZING
 7. v1.3.0: **folyamatos RX listener** (nem `available()` polling) + közös `>` prompt protokoll — ez volt a tipikus ELM „nem válaszol” oka  
 8. Soft recovery: ATSP0 + 0100 teljes bontás előtt  
 9. BLE: UUID hint mátrix (ffe0/fff0/ff00/6e400001 + write/notify)  
@@ -77,7 +78,7 @@ MIT + safety notice. Nincs garancia. Diagnosztika saját felelősségre.
 
 Production-oriented OBD diagnostic tester for Android. **No mock/demo data on the product path.** Real ELM327/STN adapter required.
 
-**READ ONLY** by default. **v1.3.0 dual-stack:** Classic SPP continuous RX + BLE UART → shared `>` prompt session (Flutter architecture ported to Kotlin).
+**READ ONLY** by default. **v1.3.1 dual-stack:** Classic SPP continuous RX + BLE UART → shared `>` prompt session (Flutter architecture ported to Kotlin).
 
 ### Connect flow
 
