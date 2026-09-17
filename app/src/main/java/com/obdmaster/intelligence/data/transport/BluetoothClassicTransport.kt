@@ -41,15 +41,17 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Classic Bluetooth RFCOMM (SPP) — Flutter `BluetoothConnection.toAddress` spirit.
+ * Classic Bluetooth RFCOMM (SPP) — literal Flutter `BluetoothConnection.toAddress` path.
  *
- * PRIMARY: open socket → continuous InputStream read on dedicated coroutine feeding
- * [ElmByteStreamSession.onBytes] (NOT available()-only polling).
- * Fallbacks: insecure SPP → secure SPP → SDP UUIDs → reflection channels 1–30.
+ * Order (default): cancelDiscovery → prefer BONDED (optional short createBond) →
+ * insecure SPP 20s → secure SPP 20s → reflection channel 1 insecure/secure only.
+ * Channels 2–5 only if [allowExtraRfcommChannels] (default OFF).
+ * Continuous InputStream.read → shared [ElmByteStreamSession.onBytes].
  */
 @Singleton
 class BluetoothClassicTransport @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    facade: ObdBluetoothFacade
 ) : ObdTransport {
 
     override val type = TransportType.BLUETOOTH_CLASSIC
@@ -59,7 +61,11 @@ class BluetoothClassicTransport @Inject constructor(
     private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _state.asStateFlow()
 
-    val session = ElmByteStreamSession()
+    /** Shared with BLE — Flutter single `_rx` / `_pending`. */
+    val session: ElmByteStreamSession = facade.session
+
+    /** Last-resort RFCOMM channels 2–5 (default OFF — can take long). */
+    @Volatile var allowExtraRfcommChannels: Boolean = false
 
     private var socket: BluetoothSocket? = null
     private var input: InputStream? = null
@@ -74,11 +80,11 @@ class BluetoothClassicTransport @Inject constructor(
 
     companion object {
         val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
-        private const val FIRST_TIMEOUT_MS = 20_000L
-        private const val CHANNEL_TIMEOUT_MS = 5_000L
-        private const val BOND_WAIT_MS = 15_000L
-        private const val UUID_FETCH_WAIT_MS = 8_000L
-        private const val BETWEEN_ATTEMPT_DELAY_MS = 350L
+        private const val TO_ADDRESS_TIMEOUT_MS = 20_000L
+        private const val CHANNEL1_TIMEOUT_MS = 8_000L
+        private const val EXTRA_CHANNEL_TIMEOUT_MS = 4_000L
+        private const val BOND_WAIT_MS = 8_000L
+        private const val BETWEEN_ATTEMPT_DELAY_MS = 200L
         private const val DISCOVERY_DEFAULT_MS = 12_000L
     }
 
@@ -258,16 +264,28 @@ class BluetoothClassicTransport @Inject constructor(
             address
         }
 
+        // 1) cancelDiscovery — Flutter / toAddress also cancels discovery first
         stopDiscoveryInternal(bt)
-        delay(150)
+        delay(100)
 
         val errors = mutableListOf<String>()
-        val bondOk = ensureBonded(device, BOND_WAIT_MS)
-        errors += if (bondOk) "párosítás: BONDED OK" else
-            "párosítás: nem sikerült createBond / bond timeout (PIN gyakran 1234 vagy 0000)"
 
-        val sppUuids = collectSppUuids(device)
-        errors += "SDP UUID-k: ${sppUuids.joinToString { shortUuid(it) }.ifBlank { "(nincs)" }}"
+        // 2) Prefer BONDED; optional short createBond+wait
+        val alreadyBonded = try {
+            device.bondState == BluetoothDevice.BOND_BONDED
+        } catch (_: SecurityException) {
+            false
+        }
+        if (alreadyBonded) {
+            errors += "párosítás: már BONDED"
+        } else {
+            val bondOk = ensureBonded(device, BOND_WAIT_MS)
+            errors += if (bondOk) {
+                "párosítás: createBond → BONDED"
+            } else {
+                "párosítás: nem BONDED (rövid várakozás után is) — folytatás toAddress úttal"
+            }
+        }
 
         stopDiscoveryInternal(bt)
 
@@ -277,29 +295,32 @@ class BluetoothClassicTransport @Inject constructor(
             val factory: (BluetoothDevice) -> BluetoothSocket
         )
 
+        // 3–5) Flutter toAddress path FIRST — NOT SDP-all + channels 1–30
         val attempts = mutableListOf<Attempt>()
-        // PRIMARY path mirrors flutter_bluetooth_serial toAddress (insecure SPP first)
-        attempts += Attempt("insecure SPP UUID (toAddress-like)", FIRST_TIMEOUT_MS) {
+        // Primary: createInsecureRfcommSocketToServiceRecord(SPP) 20s  (== toAddress)
+        attempts += Attempt("toAddress insecure SPP", TO_ADDRESS_TIMEOUT_MS) {
             it.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
         }
-        attempts += Attempt("secure SPP UUID", FIRST_TIMEOUT_MS) {
+        // Fallback: secure SPP 20s
+        attempts += Attempt("secure SPP", TO_ADDRESS_TIMEOUT_MS) {
             it.createRfcommSocketToServiceRecord(SPP_UUID)
         }
-        for (uuid in sppUuids) {
-            if (uuid == SPP_UUID) continue
-            attempts += Attempt("insecure SDP ${shortUuid(uuid)}", FIRST_TIMEOUT_MS) { d ->
-                d.createInsecureRfcommSocketToServiceRecord(uuid)
-            }
-            attempts += Attempt("secure SDP ${shortUuid(uuid)}", FIRST_TIMEOUT_MS) { d ->
-                d.createRfcommSocketToServiceRecord(uuid)
-            }
+        // Reflection channel 1 only
+        attempts += Attempt("reflection insecure ch1", CHANNEL1_TIMEOUT_MS) { d ->
+            createReflectionSocket(d, 1, insecure = true)
         }
-        for (ch in 1..30) {
-            attempts += Attempt("insecure reflection ch$ch", CHANNEL_TIMEOUT_MS) { d ->
-                createReflectionSocket(d, ch, insecure = true)
-            }
-            attempts += Attempt("secure reflection ch$ch", CHANNEL_TIMEOUT_MS) { d ->
-                createReflectionSocket(d, ch, insecure = false)
+        attempts += Attempt("reflection secure ch1", CHANNEL1_TIMEOUT_MS) { d ->
+            createReflectionSocket(d, 1, insecure = false)
+        }
+        // Optional last resort: channels 2–5 (default OFF)
+        if (allowExtraRfcommChannels) {
+            for (ch in 2..5) {
+                attempts += Attempt("extra insecure ch$ch", EXTRA_CHANNEL_TIMEOUT_MS) { d ->
+                    createReflectionSocket(d, ch, insecure = true)
+                }
+                attempts += Attempt("extra secure ch$ch", EXTRA_CHANNEL_TIMEOUT_MS) { d ->
+                    createReflectionSocket(d, ch, insecure = false)
+                }
             }
         }
 
@@ -310,9 +331,9 @@ class BluetoothClassicTransport @Inject constructor(
                 val connected = attempt.factory(device)
                 sock = connected
                 connectSocketWithTimeout(connected, attempt.timeoutMs)
-                // Socket OK → attach continuous RX listener (Flutter input.listen spirit)
                 bindSocketAndStartRx(connected)
-                _state.value = ConnectionState.CONNECTED
+                // Link up — fully CONNECTED only after ELM init (hub/repo)
+                _state.value = ConnectionState.CONNECTING
                 errors += "${attempt.label}: socket + continuous RX OK"
                 return@withContext true
             } catch (e: Exception) {
@@ -332,11 +353,12 @@ class BluetoothClassicTransport @Inject constructor(
         throw TransportException(
             buildString {
                 append("Bluetooth Classic csatlakozás sikertelen ($address / $displayName).\n")
+                append("Flutter toAddress út (insecure/secure SPP + ch1) mind hibázott.\n")
                 append("Próbák / attempt log:\n")
                 append(errors.joinToString("\n"))
                 append(
                     "\nTipp: párosítsd előbb (PIN 1234 vagy 0000), zárd be a Torque/más OBD appot, " +
-                        "legyél közel az adapterhez."
+                        "legyél közel az adapterhez. Olcsó kínai klón → próbáld BLE-t."
                 )
             }
         )
@@ -451,63 +473,8 @@ class BluetoothClassicTransport @Inject constructor(
     }
 
     @SuppressLint("MissingPermission")
-    private suspend fun collectSppUuids(device: BluetoothDevice): List<UUID> {
-        val collected = linkedSetOf<UUID>()
-        collected += SPP_UUID
-        fun absorb(arr: Array<out ParcelUuid>?) {
-            arr?.forEach { pu ->
-                val u = pu.uuid
-                if (looksLikeSppUuid(u)) collected += u
-            }
-        }
-        absorb(device.uuids)
 
-        val done = CompletableDeferred<Unit>()
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(ctx: Context, intent: Intent) {
-                if (intent.action != BluetoothDevice.ACTION_UUID) return
-                val d = parcelDevice(intent) ?: return
-                if (!d.address.equals(device.address, ignoreCase = true)) return
-                @Suppress("DEPRECATION")
-                val extra: Array<out ParcelUuid>? =
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableArrayExtra(
-                            BluetoothDevice.EXTRA_UUID,
-                            ParcelUuid::class.java
-                        )
-                    } else {
-                        intent.getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID)
-                            ?.filterIsInstance<ParcelUuid>()
-                            ?.toTypedArray()
-                    }
-                absorb(extra)
-                absorb(device.uuids)
-                done.complete(Unit)
-            }
-        }
-        registerReceiverCompat(receiver, IntentFilter(BluetoothDevice.ACTION_UUID))
-        try {
-            val started = runCatching { device.fetchUuidsWithSdp() }.getOrDefault(false)
-            if (started) {
-                withTimeoutOrNull(UUID_FETCH_WAIT_MS) { done.await() }
-            } else {
-                delay(400)
-            }
-        } finally {
-            runCatching { context.unregisterReceiver(receiver) }
-        }
-        absorb(device.uuids)
-        return collected.toList()
-    }
 
-    private fun looksLikeSppUuid(u: UUID): Boolean {
-        val s = u.toString().lowercase()
-        return s.startsWith("00001101-") ||
-            u == SPP_UUID ||
-            s.contains("1101-0000-1000-8000")
-    }
-
-    private fun shortUuid(u: UUID): String = u.toString().take(8)
 
     private fun createReflectionSocket(
         device: BluetoothDevice,
@@ -580,9 +547,25 @@ class BluetoothClassicTransport @Inject constructor(
     }
 
     override suspend fun transact(command: String, timeoutMs: Long): String {
-        if (!session.isAttached || _state.value != ConnectionState.CONNECTED) {
+        if (!session.isAttached) {
             throw TransportException("Nincs kapcsolat (BT Classic) / Not connected")
         }
+        // Allow during CONNECTING/INITIALIZING (ELM init) — Flutter marks connected only after init
+        val st = _state.value
+        if (st != ConnectionState.CONNECTING &&
+            st != ConnectionState.INITIALIZING &&
+            st != ConnectionState.CONNECTED
+        ) {
+            throw TransportException("Nincs kapcsolat (BT Classic) / Not connected (state=$st)")
+        }
         return session.transactOrThrow(command, timeoutMs)
+    }
+
+    fun markInitializing() {
+        if (session.isAttached) _state.value = ConnectionState.INITIALIZING
+    }
+
+    fun markConnected() {
+        if (session.isAttached) _state.value = ConnectionState.CONNECTED
     }
 }

@@ -42,7 +42,8 @@ import kotlin.coroutines.resume
  */
 @Singleton
 class BleTransport @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    facade: ObdBluetoothFacade
 ) : ObdTransport {
 
     override val type = TransportType.BLE
@@ -52,7 +53,8 @@ class BleTransport @Inject constructor(
     private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _state.asStateFlow()
 
-    val session = ElmByteStreamSession()
+    /** Shared with Classic — Flutter single `_rx` / `_pending`. */
+    val session: ElmByteStreamSession = facade.session
 
     private var gatt: BluetoothGatt? = null
     private var writeChar: BluetoothGattCharacteristic? = null
@@ -162,15 +164,18 @@ class BleTransport @Inject constructor(
                             return
                         }
                         val resolved = resolveCharacteristics(g)
-                        if (!resolved) {
+                        if (!resolved || writeChar == null) {
+                            // Never fake connected — Flutter throws if write==null
                             if (cont.isActive) cont.resume(false)
                             return
                         }
-                        enableNotify(g, notifyChar!!)
+                        // setNotify before ELM init (Flutter order)
+                        notifyChar?.let { enableNotify(g, it) }
                         attachSession(g)
                         connectedFlag.set(true)
                         gatt = g
-                        _state.value = ConnectionState.CONNECTED
+                        // Link up only — CONNECTED after ELM init
+                        _state.value = ConnectionState.CONNECTING
                         if (cont.isActive) cont.resume(true)
                     }
 
@@ -206,11 +211,15 @@ class BleTransport @Inject constructor(
         } ?: false
 
         if (!ok) {
+            val svcHint = runCatching {
+                gatt?.services?.joinToString { it.uuid.toString() } ?: "(nincs szolgáltatás)"
+            }.getOrDefault("(nincs)")
             disconnect()
             _state.value = ConnectionState.ERROR
             throw TransportException(
-                "BLE connect/service discovery failed for $address " +
-                    "(timeout 20s, autoConnect=false). UUID hints: ffe0/fff0/NUS."
+                "BLE csatlakozás / szolgáltatásfelderítés sikertelen ($address). " +
+                    "Nincs író karakterisztika (FFE1/NUS) vagy timeout 20s. " +
+                    "Szolgáltatások: $svcHint"
             )
         }
         // Brief settle for CCCD write
@@ -379,9 +388,24 @@ class BleTransport @Inject constructor(
     }
 
     override suspend fun transact(command: String, timeoutMs: Long): String {
-        if (!session.isAttached || _state.value != ConnectionState.CONNECTED) {
+        if (!session.isAttached) {
             throw TransportException("Not connected (BLE)")
         }
+        val st = _state.value
+        if (st != ConnectionState.CONNECTING &&
+            st != ConnectionState.INITIALIZING &&
+            st != ConnectionState.CONNECTED
+        ) {
+            throw TransportException("Not connected (BLE) state=$st")
+        }
         return session.transactOrThrow(command, timeoutMs)
+    }
+
+    fun markInitializing() {
+        if (session.isAttached) _state.value = ConnectionState.INITIALIZING
+    }
+
+    fun markConnected() {
+        if (session.isAttached) _state.value = ConnectionState.CONNECTED
     }
 }

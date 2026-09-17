@@ -27,6 +27,7 @@ class MainViewModel @Inject constructor(
 ) : ViewModel() {
 
     val connectionState = diagnostic.connectionState
+    val connectPhase = diagnostic.connectPhase
     val activeTransport = diagnostic.activeTransport
     val activeAdapterName = diagnostic.activeAdapterName
     val adapterType = diagnostic.adapterType

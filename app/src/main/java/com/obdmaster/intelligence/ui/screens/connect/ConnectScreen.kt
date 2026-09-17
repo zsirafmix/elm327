@@ -28,6 +28,7 @@ import com.obdmaster.intelligence.ui.components.SectionCard
 fun ConnectScreen(vm: MainViewModel) {
     val context = LocalContext.current
     val conn by vm.connectionState.collectAsState()
+    val phase by vm.connectPhase.collectAsState()
     val name by vm.activeAdapterName.collectAsState()
     val transport by vm.activeTransport.collectAsState()
     val devices by vm.devices.collectAsState()
@@ -138,6 +139,16 @@ fun ConnectScreen(vm: MainViewModel) {
     ) {
         SafetyBanner()
         SectionCard("Status / Állapot") {
+            val phaseLabel = when {
+                !permissionsGranted -> "Engedélyek"
+                discovering -> "Keresés"
+                conn == ConnectionState.CONNECTING -> "Csatlakozás"
+                conn == ConnectionState.INITIALIZING -> "ELM init"
+                conn == ConnectionState.CONNECTED -> "Kész"
+                phase.isNotBlank() && phase != "—" -> phase
+                else -> "—"
+            }
+            Text("Fázis: $phaseLabel")
             Text("State: $conn")
             Text("Adapter: $name")
             Text("Transport: ${transport ?: "—"}")
@@ -152,6 +163,9 @@ fun ConnectScreen(vm: MainViewModel) {
                 Button(onClick = { vm.disconnect() }, enabled = !busy) { Text("Disconnect") }
                 Text("Sikeres kapcsolat + ELM init után az AutoTest automatikusan elindul.")
             }
+            if (conn == ConnectionState.INITIALIZING) {
+                Text("ELM327 inicializálás (ATZ, ATE0, …) — még nem „Kész”.")
+            }
         }
 
         SectionCard("Bluetooth dual-stack (Classic SPP + BLE UART)") {
@@ -160,7 +174,7 @@ fun ConnectScreen(vm: MainViewModel) {
                     "4) Választás → 5) Kapcsolat + ELM init (ATZ 8s, ATH0) → AutoTest"
             )
             Text(
-                "Párosítás PIN gyakran 1234 vagy 0000. Olcsó ELM327 = Classic SPP. Zárd be a Torque-ot.",
+                "Párosítás PIN gyakran 1234 vagy 0000. Tipp: olcsó kínai adapter → BLE. Zárd be a Torque-ot.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.primary
             )

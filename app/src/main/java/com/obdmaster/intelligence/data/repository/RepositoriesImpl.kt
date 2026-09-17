@@ -50,6 +50,7 @@ class DiagnosticRepositoryImpl @Inject constructor(
     private val _autoTest = MutableStateFlow(AutoTestState(steps = AutoTestState.defaultSteps()))
 
     override val connectionState = hub.connectionState
+    override val connectPhase = hub.connectPhase
     override val activeTransport = hub.activeType
     override val activeAdapterName = hub.activeName
     override val adapterType = _adapter.asStateFlow()
@@ -78,14 +79,14 @@ class DiagnosticRepositoryImpl @Inject constructor(
     override suspend fun connect(target: ConnectionTarget) {
         _lastError.value = null
         try {
-            hub.connect(target)
+            hub.connect(target) // stopScan + disconnect + CONNECTING → link → INITIALIZING
             step("Init", 5f, "Initializing ELM AT sequence…")
             try {
                 elm.initAdapter()
             } catch (e: Exception) {
                 runCatching { hub.disconnect() }
                 val msg = if (target.transport == TransportType.BLUETOOTH_CLASSIC) {
-                    "Socket OK de az adapter nem válaszol (ATZ). Próbáld újra / másik csatorna.\n" +
+                    "Socket OK de az adapter nem válaszol (ATZ). Próbáld újra.\n" +
                         (e.message ?: "")
                 } else {
                     e.message ?: e.toString()
@@ -94,6 +95,7 @@ class DiagnosticRepositoryImpl @Inject constructor(
                 _progress.value = TestProgress("Error", 0f, msg)
                 throw TransportException(msg, e)
             }
+            hub.markFullyConnected() // Flutter: connected only after ELM init
             val id = runCatching { elm.identify() }.getOrDefault("")
             _adapter.value = detectType(id)
             step("Connected", 10f, "Connected: ${target.displayName}")

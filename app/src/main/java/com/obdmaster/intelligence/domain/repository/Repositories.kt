@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 
 interface DiagnosticRepository {
     val connectionState: StateFlow<ConnectionState>
+    val connectPhase: StateFlow<String>
     val activeTransport: StateFlow<TransportType?>
     val activeAdapterName: StateFlow<String>
     val adapterType: StateFlow<AdapterType>

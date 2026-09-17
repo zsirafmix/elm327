@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.3.1] — 2026-09-17
+
+### Fixed
+- **Critical:** Classic BT connect no longer tries SDP-all + RFCOMM channels 1–30×2 (could take minutes / look hung). Now Flutter `toAddress` order: insecure SPP 20s → secure SPP 20s → reflection ch1 only (channels 2–5 optional, default OFF).
+- Shared `ElmByteStreamSession` via `ObdBluetoothFacade` (single RX/pending/busy) for Classic + BLE — hub.transact always uses active transport session.
+- Connection states: CONNECTING → INITIALIZING → CONNECTED; not fully connected until ELM init succeeds.
+- ELM init: ATZ with ELM/STN still marks OK when 0100 is NO DATA (ignition off), matching Flutter.
+- BLE: never fake-connected if write characteristic missing; setNotify before init; WRNR when only writeWithoutResponse.
+
+### UI
+- Phase labels: Engedélyek / Keresés / Csatlakozás / ELM init / Kész
+- Clear Classic vs BLE badge; tip: olcsó kínai → BLE
+
+### Changed
+- versionName **1.3.1** / versionCode **7**
+
+
 ## [1.3.0] — 2026-09-16
 
 ### Fixed

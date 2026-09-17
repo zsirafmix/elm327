@@ -17,7 +17,8 @@ class Elm327CommandLayer @Inject constructor(
     private val logDao: DiagnosticLogDao
 ) {
     fun ensureConnected() {
-        if (!hub.isConnected()) throw NotConnectedException()
+        // During ELM init hub is INITIALIZING (link up) — Flutter still sends AT cmds
+        if (!hub.isLinkUp() && !hub.isConnected()) throw NotConnectedException()
     }
 
     /**
@@ -33,7 +34,10 @@ class Elm327CommandLayer @Inject constructor(
         val z = sendTolerant("ATZ", timeoutMs = 8_000)
         sb.append(z).append('\n')
         val zu = z.uppercase()
-        if (zu.contains("ELM") || zu.contains("STN") || !ElmByteStreamSession.isEmptyOrNoData(z)) {
+        // Flutter: ATZ with ELM/STN ⇒ initOk even if later 0100 is NO DATA (ignition off)
+        if (zu.contains("ELM") || zu.contains("STN") || zu.contains("OBD") ||
+            !ElmByteStreamSession.isEmptyOrNoData(z)
+        ) {
             initOk = true
         }
         kotlinx.coroutines.delay(350)
