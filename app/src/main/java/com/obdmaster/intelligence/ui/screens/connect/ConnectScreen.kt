@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.obdmaster.intelligence.data.transport.BleTransport
 import com.obdmaster.intelligence.domain.model.ConnectionState
 import com.obdmaster.intelligence.domain.model.TransportType
 import com.obdmaster.intelligence.ui.MainViewModel
@@ -170,13 +171,18 @@ fun ConnectScreen(vm: MainViewModel) {
 
         SectionCard("Bluetooth dual-stack (Classic SPP + BLE UART)") {
             Text(
-                "1) Engedélyek → 2) BT BE → 3) Lista (párosított + Classic ~12s + BLE) → " +
-                    "4) Választás → 5) Kapcsolat + ELM init (ATZ 8s, ATH0) → AutoTest"
+                "1) Engedélyek → 2) BT BE → 3) Lista (párosított + Classic + BLE) → " +
+                    "4) Választás → 5) Kapcsolat + ELM init → AutoTest"
             )
             Text(
-                "Párosítás PIN gyakran 1234 vagy 0000. Tipp: olcsó kínai adapter → BLE. Zárd be a Torque-ot.",
+                "IOS-Vlink / Vgate = BLE. Ne Classic párosított listából válaszd. " +
+                    "RSSI gyenge (−90 alatt): tedd a telefont az adapter mellé.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                "Párosítás PIN gyakran 1234 vagy 0000. Zárd be a Torque-ot.",
+                style = MaterialTheme.typography.bodySmall
             )
             if (!btEnabled) {
                 Text(
@@ -219,8 +225,8 @@ fun ConnectScreen(vm: MainViewModel) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    if (discovering) "Keresés… (~12s Classic + BLE)"
-                    else "ELM327 keresése (Classic + BLE ~12s)"
+                    if (discovering) "Keresés… (~20s Classic + BLE)"
+                    else "ELM327 keresése (Classic + BLE ~20s)"
                 )
             }
             if (!btEnabled) {
@@ -234,13 +240,30 @@ fun ConnectScreen(vm: MainViewModel) {
             }
         }
 
-        SectionCard("Bluetooth LE separately") {
-            Button(
-                onClick = { ensureBtPermissionThen { vm.scanBle() } },
-                enabled = !busy
-            ) { Text("Scan BLE OBD (~12s)") }
+        SectionCard("Bluetooth LE (IOS-Vlink / Vgate)") {
             Text(
-                "UUID hints: ffe0/fff0/ff00/NUS. Ha OBD/ELM név és BLE nem megy → Classic fallback.",
+                "IOS-Vlink / Vgate = BLE. Ne Classic párosított listából válaszd. " +
+                    "RSSI gyenge (−90 alatt): tedd a telefont az adapter mellé.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.tertiary
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { ensureBtPermissionThen { vm.scanBle() } },
+                    enabled = !busy,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(if (discovering) "BLE scan…" else "Scan / Rescan BLE (~18s)")
+                }
+                OutlinedButton(
+                    onClick = { vm.clearBleCache() },
+                    enabled = !busy,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Cache törlés") }
+            }
+            Text(
+                "UUID hints: ffe0/fff0/ff00/NUS. Név: vlink, ios-vlink, vgate, vlinker… " +
+                    "Flaky scan: utolsó találat megmarad cache-ben.",
                 style = MaterialTheme.typography.bodySmall
             )
         }
@@ -263,20 +286,33 @@ fun ConnectScreen(vm: MainViewModel) {
                     when {
                         !btEnabled -> "Nincs eszköz — Bluetooth ki van kapcsolva."
                         !permissionsGranted -> "Nincs eszköz — engedély hiányzik."
-                        else -> "Nincs listázott eszköz. Párosíts / ELM327 keresése."
+                        else -> "Nincs listázott eszköz. Scan BLE / ELM327 keresése."
                     }
                 )
             }
             devices.forEach { d ->
+                val forceBle = BleTransport.forceBleTransport(d.name)
                 val kind = when {
+                    forceBle -> "BLE (IOS-Vlink)"
                     d.isBle || d.transport == TransportType.BLE -> "BLE"
                     d.bonded -> "Classic · bonded"
                     else -> "Classic"
                 }
+                val rssiTxt = d.rssi?.let { " RSSI=$it" } ?: ""
+                val weakWarn = if (d.rssi != null && d.rssi < -90) " — menj közelebb!" else ""
                 ListItem(
                     headlineContent = { Text(d.name) },
                     supportingContent = {
-                        Text("$kind · ${d.address} ${d.extra}")
+                        Column {
+                            Text("$kind · ${d.address}$rssiTxt ${d.extra}")
+                            if (weakWarn.isNotEmpty()) {
+                                Text(
+                                    "RSSI gyenge$weakWarn",
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
                     },
                     modifier = Modifier.clickable(enabled = !busy) {
                         ensureBtPermissionThen { vm.connectDevice(d) }
@@ -288,6 +324,23 @@ fun ConnectScreen(vm: MainViewModel) {
         if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         msg?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
         err?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+
+        SectionCard("Kapcsolati napló / Connection log") {
+            Text(
+                "CONNECT_START / BLE_GATT / BLE_SERVICES / BLE_CHARS / ELM_INIT / CONNECT_OK|FAIL",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { vm.shareConnectionLog() },
+                    enabled = !busy,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Export log") }
+                TextButton(onClick = { vm.clearConnectError() }) {
+                    Text("UI napló törlés")
+                }
+            }
+        }
 
         val logText = attemptLog ?: err
         if (!logText.isNullOrBlank() && (attemptLog != null || (err?.contains('\n') == true))) {

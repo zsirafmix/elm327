@@ -6,6 +6,7 @@ import com.obdmaster.intelligence.data.local.SeedData
 import com.obdmaster.intelligence.data.local.dao.*
 import com.obdmaster.intelligence.data.local.entity.TestSessionEntity
 import com.obdmaster.intelligence.data.transport.TransportHub
+import com.obdmaster.intelligence.util.ConnectionLog
 import com.obdmaster.intelligence.domain.model.*
 import com.obdmaster.intelligence.domain.repository.*
 import com.obdmaster.intelligence.knowledge.OnlineKnowledgeEngine
@@ -34,7 +35,8 @@ class DiagnosticRepositoryImpl @Inject constructor(
     private val sessionDao: TestSessionDao,
     private val logDao: DiagnosticLogDao,
     private val hub: TransportHub,
-    private val safety: SafetyGate
+    private val safety: SafetyGate,
+    private val clog: ConnectionLog
 ) : DiagnosticRepository {
 
     private val _adapter = MutableStateFlow(AdapterType.UNKNOWN)
@@ -69,6 +71,7 @@ class DiagnosticRepositoryImpl @Inject constructor(
     override suspend fun discoverBluetoothDevices(durationMs: Long): List<AdapterDevice> =
         hub.scanAllBluetooth(durationMs)
     override suspend fun scanBleDevices(timeoutMs: Long): List<AdapterDevice> = hub.scanBle(timeoutMs)
+    override fun clearBleScanCache() = hub.clearBleScanCache()
     override suspend fun listUsbDevices(): List<AdapterDevice> = hub.listUsb()
     override fun isBluetoothAvailable(): Boolean = hub.isBluetoothAvailable()
     override fun isBluetoothEnabled(): Boolean = hub.isBluetoothEnabled()
@@ -78,14 +81,20 @@ class DiagnosticRepositoryImpl @Inject constructor(
 
     override suspend fun connect(target: ConnectionTarget) {
         _lastError.value = null
+        clog.log("CONNECT_START", "repo ${target.transport} '${target.displayName}' ${target.address}")
         try {
             hub.connect(target) // stopScan + disconnect + CONNECTING → link → INITIALIZING
             step("Init", 5f, "Initializing ELM AT sequence…")
+            clog.log("ELM_INIT", "ATZ sequence begin")
             try {
-                elm.initAdapter()
+                val initOut = elm.initAdapter()
+                clog.log("ELM_INIT", "ok preview=${initOut.take(120).replace("\n", " | ")}")
             } catch (e: Exception) {
+                clog.log("CONNECT_FAIL", "ELM_INIT ${e.javaClass.simpleName}: ${e.message}")
                 runCatching { hub.disconnect() }
-                val msg = if (target.transport == TransportType.BLUETOOTH_CLASSIC) {
+                val msg = if (target.transport == TransportType.BLUETOOTH_CLASSIC &&
+                    !com.obdmaster.intelligence.data.transport.BleTransport.forceBleTransport(target.displayName)
+                ) {
                     "Socket OK de az adapter nem válaszol (ATZ). Próbáld újra.\n" +
                         (e.message ?: "")
                 } else {
@@ -98,8 +107,10 @@ class DiagnosticRepositoryImpl @Inject constructor(
             hub.markFullyConnected() // Flutter: connected only after ELM init
             val id = runCatching { elm.identify() }.getOrDefault("")
             _adapter.value = detectType(id)
+            clog.log("CONNECT_OK", "${target.displayName} adapter=$id")
             step("Connected", 10f, "Connected: ${target.displayName}")
         } catch (e: Exception) {
+            clog.log("CONNECT_FAIL", "${e.javaClass.simpleName}: ${e.message}")
             runCatching { if (hub.isConnected()) hub.disconnect() }
             if (_lastError.value == null) {
                 _lastError.value = e.message ?: e.toString()

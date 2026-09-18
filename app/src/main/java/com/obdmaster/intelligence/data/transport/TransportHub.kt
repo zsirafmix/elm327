@@ -6,6 +6,7 @@ import com.obdmaster.intelligence.domain.model.ConnectionTarget
 import com.obdmaster.intelligence.domain.model.NotConnectedException
 import com.obdmaster.intelligence.domain.model.TransportException
 import com.obdmaster.intelligence.domain.model.TransportType
+import com.obdmaster.intelligence.util.ConnectionLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,7 +25,8 @@ class TransportHub @Inject constructor(
     private val ble: BleTransport,
     private val wifi: WifiObdTransport,
     private val usb: UsbOtgTransport,
-    private val btFacade: ObdBluetoothFacade
+    private val btFacade: ObdBluetoothFacade,
+    private val clog: ConnectionLog
 ) {
     private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _state.asStateFlow()
@@ -81,40 +83,82 @@ class TransportHub @Inject constructor(
         _phase.value = phase
     }
 
-    suspend fun listBluetoothClassic(): List<AdapterDevice> =
-        bluetoothClassic.listBondedDevices()
+    fun clearBleScanCache() = ble.clearScanCache()
+
+    suspend fun listBluetoothClassic(): List<AdapterDevice> {
+        val list = bluetoothClassic.listBondedDevices()
+        clog.log("BT_LIST", "${list.size} bonded Classic devices")
+        // Promote Vgate/IOS-Vlink names even if they appear in Classic bonded list
+        return list.map { d ->
+            if (BleTransport.forceBleTransport(d.name)) {
+                d.copy(
+                    transport = TransportType.BLE,
+                    isBle = true,
+                    extra = (d.extra + " BLE (IOS-Vlink)").trim()
+                )
+            } else d
+        }
+    }
 
     suspend fun discoverBluetoothClassic(durationMs: Long = 12_000): List<AdapterDevice> =
         bluetoothClassic.discoverDevices(durationMs)
 
     fun cancelBluetoothDiscovery() = bluetoothClassic.cancelDiscovery()
 
-    suspend fun scanAllBluetooth(durationMs: Long = 12_000): List<AdapterDevice> {
+    suspend fun scanAllBluetooth(durationMs: Long = 20_000): List<AdapterDevice> {
         _phase.value = "Keresés"
-        val classicMs = (durationMs * 2 / 3).coerceAtLeast(7_000L)
-        val bleMs = (durationMs - classicMs).coerceAtLeast(4_000L)
+        // Lengthen BLE portion — Vgate/IOS-Vlink scans are flaky
+        val classicMs = (durationMs / 2).coerceAtLeast(8_000L)
+        val bleMs = (durationMs - classicMs).coerceAtLeast(12_000L)
+        clog.log("BT_SCAN", "dual classicMs=$classicMs bleMs=$bleMs")
         val classic = runCatching { bluetoothClassic.discoverDevices(classicMs) }
             .getOrDefault(emptyList())
+        clog.log("BT_LIST", "${classic.size} Classic (discovered+bonded)")
         runCatching { bluetoothClassic.cancelDiscovery() }
         val bleDevs = runCatching { ble.scan(bleMs) }.getOrDefault(emptyList())
         val merged = LinkedHashMap<String, AdapterDevice>()
-        classic.forEach { merged["C:${it.address.uppercase()}"] = it }
-        bleDevs.forEach { d ->
-            val cKey = "C:${d.address.uppercase()}"
-            if (merged.containsKey(cKey)) {
-                val c = merged[cKey]!!
-                merged[cKey] = c.copy(extra = c.extra + " · +BLE")
+        classic.forEach { d ->
+            if (BleTransport.forceBleTransport(d.name)) {
+                // Never keep Classic entry for Vgate/Vlink — force BLE slot
+                merged["B:${d.address.uppercase()}"] = d.copy(
+                    transport = TransportType.BLE,
+                    isBle = true,
+                    extra = "BLE (IOS-Vlink) · was Classic MAC"
+                )
             } else {
-                merged["B:${d.address.uppercase()}"] = d
+                merged["C:${d.address.uppercase()}"] = d
             }
         }
+        bleDevs.forEach { d ->
+            val addr = d.address.uppercase()
+            val cKey = "C:$addr"
+            val bKey = "B:$addr"
+            if (BleTransport.forceBleTransport(d.name)) {
+                merged.remove(cKey)
+                merged[bKey] = d.copy(
+                    transport = TransportType.BLE,
+                    isBle = true,
+                    extra = d.extra.ifBlank { "BLE (IOS-Vlink)" }
+                )
+            } else if (merged.containsKey(cKey)) {
+                val c = merged[cKey]!!
+                merged[cKey] = c.copy(extra = (c.extra + " · +BLE").trim())
+            } else {
+                merged[bKey] = d
+            }
+        }
+        clog.log(
+            "BT_SCAN",
+            "merged=${merged.size} (classic=${classic.size} ble=${bleDevs.size})"
+        )
         return merged.values.sortedWith(
-            compareByDescending<AdapterDevice> { it.bonded }
+            compareByDescending<AdapterDevice> { it.isBle }
+                .thenByDescending { it.bonded }
                 .thenBy { it.name.lowercase() }
         )
     }
 
-    suspend fun scanBle(timeoutMs: Long = 12_000): List<AdapterDevice> {
+    suspend fun scanBle(timeoutMs: Long = 18_000): List<AdapterDevice> {
         _phase.value = "Keresés"
         return ble.scan(timeoutMs)
     }
@@ -132,11 +176,35 @@ class TransportHub @Inject constructor(
         _state.value = ConnectionState.CONNECTING
         runCatching { bluetoothClassic.cancelDiscovery() }
 
-        val transport: ObdTransport = when (target.transport) {
+        // Force BLE for Vgate / IOS-Vlink even if caller passed Classic
+        val effectiveTransport =
+            if (BleTransport.forceBleTransport(target.displayName) ||
+                BleTransport.forceBleTransport(target.address)
+            ) {
+                TransportType.BLE
+            } else {
+                target.transport
+            }
+        val effective = if (effectiveTransport != target.transport) {
+            clog.log(
+                "CONNECT_START",
+                "forced BLE for '${target.displayName}' (was ${target.transport})"
+            )
+            target.copy(transport = TransportType.BLE)
+        } else {
+            target
+        }
+
+        clog.log(
+            "CONNECT_START",
+            "${effective.transport} name='${effective.displayName}' addr=${effective.address}"
+        )
+
+        val transport: ObdTransport = when (effective.transport) {
             TransportType.BLUETOOTH_CLASSIC -> bluetoothClassic
             TransportType.BLE -> {
-                target.bleServiceUuid?.let { s ->
-                    ble.configureUuids(s, target.bleWriteUuid, target.bleNotifyUuid)
+                effective.bleServiceUuid?.let { s ->
+                    ble.configureUuids(s, effective.bleWriteUuid, effective.bleNotifyUuid)
                 }
                 ble
             }
@@ -148,8 +216,9 @@ class TransportHub @Inject constructor(
         }
 
         val ok = try {
-            transport.connect(target.address, target.port)
+            transport.connect(effective.address, effective.port)
         } catch (e: Exception) {
+            clog.log("CONNECT_FAIL", "${e.javaClass.simpleName}: ${e.message}")
             _state.value = ConnectionState.ERROR
             _phase.value = "—"
             _activeType.value = null
@@ -158,19 +227,21 @@ class TransportHub @Inject constructor(
             throw e
         }
         if (!ok) {
+            clog.log("CONNECT_FAIL", "transport.connect returned false")
             _state.value = ConnectionState.ERROR
             _phase.value = "—"
             active = null
             throw TransportException(
-                "Connection failed to ${target.displayName} (${target.transport})"
+                "Connection failed to ${effective.displayName} (${effective.transport})"
             )
         }
 
         active = transport
-        _activeType.value = target.transport
-        _activeName.value = target.displayName
+        _activeType.value = effective.transport
+        _activeName.value = effective.displayName
         _phase.value = "ELM init"
         _state.value = ConnectionState.INITIALIZING
+        clog.log("ELM_INIT", "starting ATZ sequence on ${effective.transport}")
         when (transport) {
             is BluetoothClassicTransport -> transport.markInitializing()
             is BleTransport -> transport.markInitializing()
@@ -185,6 +256,7 @@ class TransportHub @Inject constructor(
         }
         _state.value = ConnectionState.CONNECTED
         _phase.value = "Kész"
+        clog.log("CONNECT_OK", "ELM init done name=${_activeName.value} type=${_activeType.value}")
     }
 
     suspend fun disconnect() {

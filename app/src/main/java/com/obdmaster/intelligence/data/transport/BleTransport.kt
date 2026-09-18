@@ -15,10 +15,13 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import com.obdmaster.intelligence.domain.model.AdapterDevice
 import com.obdmaster.intelligence.domain.model.ConnectionState
 import com.obdmaster.intelligence.domain.model.TransportException
 import com.obdmaster.intelligence.domain.model.TransportType
+import com.obdmaster.intelligence.util.ConnectionLog
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -36,14 +39,16 @@ import javax.inject.Singleton
 import kotlin.coroutines.resume
 
 /**
- * BLE UART OBD — flutter_blue_plus spirit.
+ * BLE UART OBD — flutter_blue_plus / OBDKing ObdService spirit.
  * UUID substring hints for Chinese FFE0/FFF0/FF00 clones + Nordic NUS.
+ * Vgate / IOS-Vlink family must use this path (not Classic RFCOMM).
  * Notify → [ElmByteStreamSession.onBytes]; writeCharacteristic (WR or WRNR).
  */
 @Singleton
 class BleTransport @Inject constructor(
     @ApplicationContext private val context: Context,
-    facade: ObdBluetoothFacade
+    facade: ObdBluetoothFacade,
+    private val clog: ConnectionLog
 ) : ObdTransport {
 
     override val type = TransportType.BLE
@@ -67,7 +72,12 @@ class BleTransport @Inject constructor(
     private var overrideWrite: String? = null
     private var overrideNotify: String? = null
 
+    /** Persist last found BLE devices across flaky scans until [clearScanCache]. */
+    private val lastFound = ConcurrentHashMap<String, AdapterDevice>()
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     companion object {
+        /** Full matrix from obdking_study ObdService. */
         private val SERVICE_HINTS = listOf("ffe0", "fff0", "ff00", "6e400001")
         private val WRITE_HINTS = listOf(
             "ffe1", "fff1", "fff2", "ff01", "ff02", "6e400002"
@@ -76,10 +86,30 @@ class BleTransport @Inject constructor(
             "ffe1", "fff1", "fff2", "ff01", "ff02", "6e400003"
         )
         private val CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-        private val NAME_HINTS = listOf(
-            "obd", "elm", "vgate", "veepeak", "carista", "obdlink", "stn",
-            "lexivon", "konnwei", "vlinker", "baftor", "uart", "ble"
+
+        /**
+         * Name hints for BLE OBD UART adapters.
+         * Critical: `vlink` alone matches IOS-Vlink (`.contains("vlinker")` is false).
+         */
+        val NAME_HINTS = listOf(
+            "vlink", "ios-vlink", "ios_vlink", "vgater", "vgate", "vlinker",
+            "obd", "elm", "obdii", "obd2", "obdlink",
+            "veepeak", "carista", "stn", "lexivon", "konnwei", "baftor",
+            "uart", "ble"
         )
+
+        /** Vgate-family BLE UART — never Classic RFCOMM. */
+        fun forceBleTransport(name: String): Boolean {
+            val n = name.lowercase()
+            return listOf(
+                "vlink", "ios-vlink", "ios_vlink", "vgater", "vgate", "vlinker"
+            ).any { n.contains(it) }
+        }
+
+        fun looksLikeObdBleName(name: String): Boolean {
+            val n = name.lowercase()
+            return NAME_HINTS.any { n.contains(it) }
+        }
     }
 
     fun configureUuids(service: String, write: String?, notify: String?) {
@@ -88,6 +118,14 @@ class BleTransport @Inject constructor(
         overrideNotify = notify
     }
 
+    fun clearScanCache() {
+        lastFound.clear()
+        clog.log("BLE_SCAN", "cache cleared")
+    }
+
+    fun cachedDevices(): List<AdapterDevice> =
+        lastFound.values.sortedBy { it.name.lowercase() }
+
     private fun adapter(): BluetoothAdapter? {
         val mgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         return mgr.adapter
@@ -95,10 +133,11 @@ class BleTransport @Inject constructor(
 
     @SuppressLint("MissingPermission")
     suspend fun scan(timeoutMs: Long): List<AdapterDevice> = withContext(Dispatchers.IO) {
-        val bt = adapter() ?: return@withContext emptyList()
-        if (!bt.isEnabled) return@withContext emptyList()
-        val scanner = bt.bluetoothLeScanner ?: return@withContext emptyList()
+        val bt = adapter() ?: return@withContext cachedDevices()
+        if (!bt.isEnabled) return@withContext cachedDevices()
+        val scanner = bt.bluetoothLeScanner ?: return@withContext cachedDevices()
         val found = ConcurrentHashMap<String, AdapterDevice>()
+        clog.log("BLE_SCAN", "start timeoutMs=$timeoutMs cache=${lastFound.size}")
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 val d = result.device ?: return
@@ -110,15 +149,33 @@ class BleTransport @Inject constructor(
                     NAME_HINTS.any { name.lowercase().contains(it) }
                 if (!nameOk && !uartHint) return
                 val display = name?.takeIf { it.isNotBlank() } ?: d.address
-                found[d.address] = AdapterDevice(
+                val rssi = result.rssi
+                val force = forceBleTransport(display)
+                val badge = when {
+                    force -> "BLE (IOS-Vlink/Vgate)"
+                    uartHint -> "BLE UART hint"
+                    else -> "BLE"
+                }
+                val device = AdapterDevice(
                     id = d.address,
                     name = display,
                     transport = TransportType.BLE,
                     address = d.address,
                     bonded = false,
                     isBle = true,
-                    extra = if (uartHint) "BLE UART hint" else "BLE"
+                    rssi = rssi,
+                    extra = badge
                 )
+                found[d.address] = device
+                lastFound[d.address] = device
+                clog.log(
+                    "BLE_FOUND",
+                    "'$display' [${d.address}] RSSI=$rssi $badge"
+                )
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                clog.log("BLE_SCAN", "FAILED errorCode=$errorCode")
             }
         }
         val settings = ScanSettings.Builder()
@@ -127,13 +184,23 @@ class BleTransport @Inject constructor(
         scanner.startScan(null, settings, callback)
         delay(timeoutMs)
         runCatching { scanner.stopScan(callback) }
-        found.values.sortedBy { it.name.lowercase() }
+        clog.log(
+            "BLE_SCAN",
+            "done thisScan=${found.size} cacheTotal=${lastFound.size}"
+        )
+        // Prefer this-scan results; if flaky empty, keep last-found cache
+        if (found.isNotEmpty()) {
+            found.values.sortedBy { it.name.lowercase() }
+        } else {
+            cachedDevices()
+        }
     }
 
     @SuppressLint("MissingPermission")
     override suspend fun connect(address: String, port: Int): Boolean = withContext(Dispatchers.IO) {
         disconnect()
         _state.value = ConnectionState.CONNECTING
+        clog.log("CONNECT_START", "BLE address=$address")
         val bt = adapter() ?: throw TransportException("Bluetooth not available")
         if (!bt.isEnabled) throw TransportException("Bluetooth is disabled")
         val device = bt.getRemoteDevice(address)
@@ -142,14 +209,35 @@ class BleTransport @Inject constructor(
         } catch (_: SecurityException) {
             address
         }
+        clog.log("BLE_GATT", "connectGatt TRANSPORT_LE name=$displayName")
         connectedFlag.set(false)
+        writeChar = null
+        notifyChar = null
 
-        val ok = withTimeoutOrNull(20_000L) {
+        val ok = withTimeoutOrNull(25_000L) {
             suspendCancellableCoroutine { cont ->
                 val cb = object : BluetoothGattCallback() {
                     override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+                        clog.log(
+                            "BLE_GATT",
+                            "stateChange status=$status newState=$newState"
+                        )
                         if (newState == BluetoothProfile.STATE_CONNECTED) {
-                            g.discoverServices()
+                            runCatching {
+                                g.requestConnectionPriority(
+                                    BluetoothGatt.CONNECTION_PRIORITY_HIGH
+                                )
+                                clog.log("BLE_GATT", "CONNECTION_PRIORITY_HIGH requested")
+                            }
+                            runCatching {
+                                g.requestMtu(512)
+                                clog.log("BLE_GATT", "requestMtu(512)")
+                            }
+                            // Vgate/IOS-Vlink: settle before discoverServices
+                            mainHandler.postDelayed({
+                                clog.log("BLE_SERVICES", "discoverServices after settle")
+                                runCatching { g.discoverServices() }
+                            }, 400L)
                         } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                             connectedFlag.set(false)
                             session.notifyLinkLost("BLE kapcsolat bontva")
@@ -158,23 +246,35 @@ class BleTransport @Inject constructor(
                         }
                     }
 
+                    override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+                        clog.log("BLE_GATT", "onMtuChanged mtu=$mtu status=$status")
+                    }
+
                     override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+                        clog.log("BLE_SERVICES", "onServicesDiscovered status=$status")
                         if (status != BluetoothGatt.GATT_SUCCESS) {
                             if (cont.isActive) cont.resume(false)
                             return
                         }
+                        val dump = dumpServicesChars(g)
+                        clog.log("BLE_CHARS", dump)
                         val resolved = resolveCharacteristics(g)
                         if (!resolved || writeChar == null) {
-                            // Never fake connected — Flutter throws if write==null
+                            clog.log(
+                                "CONNECT_FAIL",
+                                "write characteristic null — $dump"
+                            )
                             if (cont.isActive) cont.resume(false)
                             return
                         }
-                        // setNotify before ELM init (Flutter order)
+                        clog.log(
+                            "BLE_CHARS",
+                            "write=${writeChar?.uuid} notify=${notifyChar?.uuid}"
+                        )
                         notifyChar?.let { enableNotify(g, it) }
                         attachSession(g)
                         connectedFlag.set(true)
                         gatt = g
-                        // Link up only — CONNECTED after ELM init
                         _state.value = ConnectionState.CONNECTING
                         if (cont.isActive) cont.resume(true)
                     }
@@ -204,6 +304,7 @@ class BleTransport @Inject constructor(
                 }
                 gatt = g
                 cont.invokeOnCancellation {
+                    mainHandler.removeCallbacksAndMessages(null)
                     runCatching { g.disconnect() }
                     runCatching { g.close() }
                 }
@@ -211,20 +312,39 @@ class BleTransport @Inject constructor(
         } ?: false
 
         if (!ok) {
-            val svcHint = runCatching {
-                gatt?.services?.joinToString { it.uuid.toString() } ?: "(nincs szolgáltatás)"
-            }.getOrDefault("(nincs)")
+            val dump = runCatching { gatt?.let { dumpServicesChars(it) } }
+                .getOrDefault("(nincs szolgáltatás)")
             disconnect()
             _state.value = ConnectionState.ERROR
-            throw TransportException(
+            val msg =
                 "BLE csatlakozás / szolgáltatásfelderítés sikertelen ($address). " +
-                    "Nincs író karakterisztika (FFE1/NUS) vagy timeout 20s. " +
-                    "Szolgáltatások: $svcHint"
-            )
+                    "Nincs író karakterisztika (FFE1/NUS) vagy timeout. " +
+                    "Szolgáltatások/karakterisztikák: $dump"
+            clog.log("CONNECT_FAIL", msg)
+            throw TransportException(msg)
         }
-        // Brief settle for CCCD write
-        delay(200)
+        // Brief settle for CCCD write + MTU
+        delay(250)
+        clog.log("BLE_GATT", "link ready write=${writeChar?.uuid}")
         true
+    }
+
+    private fun dumpServicesChars(g: BluetoothGatt): String {
+        val services = g.services.orEmpty()
+        if (services.isEmpty()) return "(üres szolgáltatás lista)"
+        return services.joinToString(" | ") { s ->
+            val chars = s.characteristics.orEmpty().joinToString(",") { c ->
+                val props = buildString {
+                    if (c.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) append("W")
+                    if (c.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0) append("N")
+                    if (c.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) append("T")
+                    if (c.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) append("I")
+                    if (c.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0) append("R")
+                }
+                "${c.uuid}[$props]"
+            }
+            "${s.uuid}{$chars}"
+        }
     }
 
     private fun attachSession(g: BluetoothGatt) {
@@ -264,7 +384,6 @@ class BleTransport @Inject constructor(
         u.toString().lowercase().replace("-", "")
 
     private fun resolveCharacteristics(g: BluetoothGatt): Boolean {
-        // Explicit overrides first
         overrideService?.let { svcStr ->
             runCatching {
                 val svc = g.getService(UUID.fromString(svcStr))
@@ -360,6 +479,7 @@ class BleTransport @Inject constructor(
     @SuppressLint("MissingPermission")
     override suspend fun disconnect() = withContext(Dispatchers.IO) {
         connectedFlag.set(false)
+        mainHandler.removeCallbacksAndMessages(null)
         session.detach()
         runCatching {
             notifyChar?.let { ch ->

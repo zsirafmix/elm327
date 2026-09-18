@@ -8,6 +8,8 @@ import androidx.lifecycle.viewModelScope
 import com.obdmaster.intelligence.domain.model.*
 import com.obdmaster.intelligence.domain.repository.*
 import com.obdmaster.intelligence.obd.safety.SafetyGate
+import com.obdmaster.intelligence.data.transport.BleTransport
+import com.obdmaster.intelligence.util.ConnectionLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Job
@@ -23,6 +25,7 @@ class MainViewModel @Inject constructor(
     private val knowledgeRepo: KnowledgeRepository,
     private val aiRepo: AiRepository,
     private val reportRepo: ReportRepository,
+    private val clog: ConnectionLog,
     @ApplicationContext private val appContext: Context
 ) : ViewModel() {
 
@@ -171,8 +174,8 @@ class MainViewModel @Inject constructor(
             return@launch
         }
         _message.value =
-            "ELM327 Classic+BLE keresés (~12s)… PIN gyakran 1234 vagy 0000."
-        runCatching { _devices.value = diagnostic.discoverBluetoothDevices(12_000) }
+            "ELM327 Classic+BLE keresés (~20s)… IOS-Vlink/Vgate = BLE. PIN 1234/0000."
+        runCatching { _devices.value = diagnostic.discoverBluetoothDevices(20_000) }
             .onSuccess {
                 _message.value = if (_devices.value.isEmpty()) {
                     "Nem talált eszközt. Kapcsold be az adaptert, legyél közel, PIN 1234/0000."
@@ -190,17 +193,61 @@ class MainViewModel @Inject constructor(
 
     fun scanBle() = viewModelScope.launch {
         _busy.value = true
+        _discovering.value = true
         refreshBluetoothStatus()
         if (!_btEnabled.value) {
             _message.value = "Bluetooth ki van kapcsolva — BLE scan nem indítható."
             _busy.value = false
+            _discovering.value = false
             return@launch
         }
-        _message.value = "BLE scan (~12s)… UUID hints ffe0/fff0/NUS. Olcsó ELM = Classic SPP."
-        runCatching { _devices.value = diagnostic.scanBleDevices(12_000) }
+        _message.value =
+            "BLE scan (~18s)… vlink/vgate/ffe0/fff0/NUS. Gyenge RSSI: tedd a telefont az adapter mellé."
+        runCatching { _devices.value = diagnostic.scanBleDevices(18_000) }
+            .onSuccess {
+                val n = _devices.value.size
+                val weak = _devices.value.count { (it.rssi ?: 0) < -90 && it.rssi != null }
+                _message.value = when {
+                    n == 0 -> "BLE: 0 eszköz. Rescan / menj közelebb. Cache üres."
+                    weak > 0 -> "$n BLE eszköz (ebből $weak gyenge RSSI — menj közelebb)."
+                    else -> "$n BLE eszköz (cache megmarad rescannelésig)."
+                }
+            }
             .onFailure { _message.value = it.message }
+        _discovering.value = false
         _busy.value = false
     }
+
+    fun clearBleCache() {
+        diagnostic.clearBleScanCache()
+        _devices.value = _devices.value.filter { !it.isBle && it.transport != TransportType.BLE }
+        _message.value = "BLE találati cache törölve."
+    }
+
+    fun shareConnectionLog() {
+        val file = clog.file()
+        if (!file.exists() || file.length() == 0L) {
+            _message.value = "Nincs connection log még. Előbb scan/connect."
+            return
+        }
+        val uri = FileProvider.getUriForFile(
+            appContext,
+            appContext.packageName + ".fileprovider",
+            file
+        )
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_SUBJECT, "OBD connection.log")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        appContext.startActivity(
+            Intent.createChooser(intent, "Share connection log")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+
+    fun connectionLogPreview(): String = clog.readAll().takeLast(4000)
 
     fun refreshUsb() = viewModelScope.launch {
         _busy.value = true
@@ -212,15 +259,31 @@ class MainViewModel @Inject constructor(
     fun connectDevice(device: AdapterDevice) = viewModelScope.launch {
         _busy.value = true
         _connectAttemptLog.value = null
-        _message.value = "Csatlakozás: ${device.name}…"
-        if (device.transport == TransportType.BLE) {
-            _message.value =
-                "BLE csatlakozás: ${device.name}… (ha sikertelen és OBD/ELM név, Classic fallback)"
+        val forceBle = BleTransport.forceBleTransport(device.name)
+        val transport = when {
+            forceBle -> TransportType.BLE
+            device.isBle -> TransportType.BLE
+            else -> device.transport
         }
+        if (device.rssi != null && device.rssi < -90) {
+            _message.value =
+                "RSSI=${device.rssi} gyenge — menj közelebb / tedd a telefont az adapter mellé. Csatlakozás: ${device.name}…"
+        } else {
+            _message.value = "Csatlakozás: ${device.name} (${transport})…"
+        }
+        if (transport == TransportType.BLE) {
+            _message.value =
+                if (forceBle) "BLE (IOS-Vlink/Vgate): ${device.name}… Classic tiltva ennél a névnél."
+                else "BLE csatlakozás: ${device.name}…"
+        }
+        clog.log(
+            "CONNECT_START",
+            "UI name='${device.name}' addr=${device.address} transport=$transport forceBle=$forceBle rssi=${device.rssi}"
+        )
         val primary = runCatching {
             diagnostic.connect(
                 ConnectionTarget(
-                    transport = device.transport,
+                    transport = transport,
                     address = device.address,
                     displayName = device.name
                 )
@@ -236,11 +299,16 @@ class MainViewModel @Inject constructor(
 
         val primaryErr = primary.exceptionOrNull()
         var detail = primaryErr?.message ?: primaryErr?.toString() ?: "Csatlakozás sikertelen"
+        detail += "\n\n--- connection.log (tail) ---\n" + clog.readAll().takeLast(1500)
 
-        // Auto-fallback: OBD-like name on BLE path → try Classic same MAC
-        if (device.transport == TransportType.BLE && looksLikeObdAdapterName(device.name)) {
+        // Classic fallback ONLY for non-Vgate OBD names that were scanned as BLE
+        if (transport == TransportType.BLE &&
+            !forceBle &&
+            looksLikeObdAdapterName(device.name)
+        ) {
             _message.value =
                 "BLE sikertelen — Classic fallback ugyanarra a MAC-re (${device.address})…"
+            clog.log("CONNECT_START", "Classic fallback for ${device.name}")
             val fallback = runCatching {
                 diagnostic.connect(
                     ConnectionTarget(
@@ -260,6 +328,8 @@ class MainViewModel @Inject constructor(
             val fbErr = fallback.exceptionOrNull()?.message ?: fallback.exceptionOrNull()?.toString()
             detail = "BLE hiba:\n" + detail + "\n\nClassic fallback hiba:\n" +
                 (fbErr ?: "ismeretlen")
+        } else if (forceBle) {
+            clog.log("CONNECT_FAIL", "Vgate/IOS-Vlink BLE failed — no Classic fallback")
         }
 
         _message.value = detail
@@ -270,8 +340,8 @@ class MainViewModel @Inject constructor(
     private fun looksLikeObdAdapterName(name: String): Boolean {
         val n = name.lowercase()
         return listOf(
-            "obd", "elm", "vgate", "obdlink", "vlinker", "obdii", "obd2",
-            "konnwei", "veepeak", "carista", "baftor", "lexivon", "scantool"
+            "obd", "elm", "vgate", "vlink", "obdlink", "vlinker", "obdii", "obd2",
+            "konnwei", "veepeak", "carista", "baftor", "lexivon", "scantool", "ios-vlink"
         ).any { n.contains(it) }
     }
 

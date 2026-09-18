@@ -19,6 +19,7 @@ import com.obdmaster.intelligence.obd.safety.SafetyGate
 import com.obdmaster.intelligence.pdf.PdfReportGenerator
 import com.obdmaster.intelligence.scoring.ScoreEngine
 import com.obdmaster.intelligence.vehicle.VinDecoder
+import com.obdmaster.intelligence.util.ConnectionLog
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -118,10 +119,11 @@ object AppModule {
         sessionDao: TestSessionDao,
         logDao: DiagnosticLogDao,
         hub: TransportHub,
-        safety: SafetyGate
+        safety: SafetyGate,
+        clog: ConnectionLog
     ): DiagnosticRepository = DiagnosticRepositoryImpl(
         elm, adapterTester, discovery, vinDecoder, scoreEngine,
-        vehicleDao, ecuDao, sessionDao, logDao, hub, safety
+        vehicleDao, ecuDao, sessionDao, logDao, hub, safety, clog
     )
 
     @Provides @Singleton

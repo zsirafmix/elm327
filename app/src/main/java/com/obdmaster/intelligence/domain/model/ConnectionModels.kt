@@ -7,7 +7,9 @@ data class AdapterDevice(
     val address: String,
     val extra: String = "",
     val bonded: Boolean = false,
-    val isBle: Boolean = false
+    val isBle: Boolean = false,
+    /** Last seen BLE RSSI; null for Classic / unknown. */
+    val rssi: Int? = null
 )
 
 data class ConnectionTarget(

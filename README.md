@@ -8,14 +8,14 @@ Professzionális Android diagnosztikai alkalmazás **valós** OBD adapter kapcso
 > **Nincs demo/mock adat a termékútvonalon.** Élő teszt = élő adapter. Hardver szükséges.
 
 **Repo:** https://github.com/zsirafmix/elm327  
-**Package:** `com.obdmaster.intelligence` · minSdk 29 · targetSdk 34 · **v1.3.1**
+**Package:** `com.obdmaster.intelligence` · minSdk 29 · targetSdk 34 · **v1.3.2**
 
 ---
 
 ## Funkciók
 
 - **Kapcsolat (dual-stack BT):** Classic SPP (folyamatos InputStream RX) + BLE UART (FFE0/FFF0/NUS UUID hint) → **egy közös `>` prompt byte-stream** (`ElmByteStreamSession`)
-- Classic discovery + bonded + BLE scan (~12s), WiFi TCP, USB OTG
+- Classic discovery + bonded + BLE scan (~18–20s), WiFi TCP, USB OTG
 - **AutoTest:** sikeres connect + ELM init után automatikus teljes READ ONLY teszt + progress UI + PDF
 - OBD Mode 01/03/06/07/09/0A olvasás; Mode 04/08 és veszélyes UDS **blokkolva**
 - VIN Mode 09-ből; offline Room referencia-katalógus; AI + PDF
@@ -24,11 +24,13 @@ Professzionális Android diagnosztikai alkalmazás **valós** OBD adapter kapcso
 
 1. Telepítse az APK-t Android 10+ eszközre  
 2. **Kapcsolat / Connect** → engedélyek (SDK 31+: SCAN+CONNECT; hely soft-ask; <31: location kötelező) → Bluetooth BE  
-3. Lista: párosított Classic + Classic discovery + BLE (~12s) — opcionális szűrés: obd/elm/vgate/ffe0/fff0/NUS  
+3. Lista: párosított Classic + Classic discovery + BLE (~18–20s) — szűrés: vlink/vgate/obd/elm/ffe0/fff0/NUS  
 4. Eszköz: név, cím, bonded, isBle → koppintás → connect  
 5. Link OK → **ELM init** (ATZ 8s → ATE0/ATL0/ATS0/**ATH0**/ATSP0 → 0100 → ATDP) → AutoTest  
 
 ## Bluetooth hibaelhárítás (ELM327) — HU
+
+0. **IOS-Vlink / Vgate = BLE** — ne Classic párosított listából. Scan BLE (~18s). RSSI −90 alatt: tedd a telefont az adapter mellé. Exportáld a `connection.log`-ot.
 
 1. **Engedélyek** → ha véglegesen elutasítva: App beállítások  
 2. **Bluetooth BE** (requestEnable)  
@@ -36,7 +38,7 @@ Professzionális Android diagnosztikai alkalmazás **valós** OBD adapter kapcso
 4. Olcsó klónok: **Classic SPP**, ne csak BLE — „ELM327 keresése (Classic + BLE)”  
 5. Zárd be a **Torque** / más OBD appot (egy RFCOMM kliens)  
 6. Legyél **közel**; gyújtás be (OBD táp)  
-8. v1.3.1: Classic **toAddress** path (SPP 20s×2 + ch1) — no more channels 1–30 marathon; shared session + INITIALIZING
+8. v1.3.2: Classic **toAddress** path (SPP 20s×2 + ch1) — no more channels 1–30 marathon; shared session + INITIALIZING
 7. v1.3.0: **folyamatos RX listener** (nem `available()` polling) + közös `>` prompt protokoll — ez volt a tipikus ELM „nem válaszol” oka  
 8. Soft recovery: ATSP0 + 0100 teljes bontás előtt  
 9. BLE: UUID hint mátrix (ffe0/fff0/ff00/6e400001 + write/notify)  
@@ -78,11 +80,11 @@ MIT + safety notice. Nincs garancia. Diagnosztika saját felelősségre.
 
 Production-oriented OBD diagnostic tester for Android. **No mock/demo data on the product path.** Real ELM327/STN adapter required.
 
-**READ ONLY** by default. **v1.3.1 dual-stack:** Classic SPP continuous RX + BLE UART → shared `>` prompt session (Flutter architecture ported to Kotlin).
+**READ ONLY** by default. **v1.3.2 dual-stack:** Classic SPP continuous RX + BLE UART → shared `>` prompt session (Flutter architecture ported to Kotlin).
 
 ### Connect flow
 
-Permissions → BT ON → bonded + Classic discovery + BLE (~12s) → select → connect → ELM init (ATZ 8s, **ATH0**) → AutoTest.
+Permissions → BT ON → bonded + Classic discovery + BLE (~18–20s) → select → connect → ELM init (ATZ 8s, **ATH0**) → AutoTest.
 
 ### Bluetooth troubleshooting
 

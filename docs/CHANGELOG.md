@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.3.2] — 2026-09-18
+
+### Fixed (Armor 19T / IOS-Vlink)
+- **IOS-Vlink / Vgate = BLE only** — name hints include `vlink`, `ios-vlink`, `ios_vlink`, `vgater` (not only `vlinker`). Selecting *Vlink* from any list forces `BleTransport`; no Classic RFCOMM fallback for Vgate family.
+- Dual-scan merge no longer keeps Classic entry when BLE/Vlink shares the MAC.
+- BLE connect robustness: `CONNECTION_PRIORITY_HIGH`, 400ms settle before `discoverServices`, `requestMtu(512)`, full UUID hint matrix; write-null error lists all service/char UUIDs.
+- Flaky BLE scan: longer scan (~18s / dual ~20s), persist last-found cache until cleared, Rescan button.
+- RSSI < −90: UI warns „menj közelebb” but still allows connect.
+
+### Added
+- `ConnectionLog` → `filesDir/logs/connection.log` with tags: `BLE_FOUND`, `BT_LIST`, `CONNECT_START`, `BLE_GATT`, `BLE_SERVICES`, `BLE_CHARS`, `ELM_INIT`, `CONNECT_OK` / `CONNECT_FAIL`
+- Connect tip (HU): IOS-Vlink/Vgate = BLE; ne Classic bonded listából; gyenge RSSI → telefon az adapter mellett
+- Export connection log share intent; badge `BLE (IOS-Vlink)`
+
+### Changed
+- versionName **1.3.2** / versionCode **8**
+
 ## [1.3.1] — 2026-09-17
 
 ### Fixed

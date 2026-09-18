@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <files-path name="app_reports" path="reports/" />
+    <files-path name="connection_logs" path="logs/" />
     <cache-path name="reports" path="reports/" />
     <external-files-path name="external_reports" path="reports/" />
 </paths>
