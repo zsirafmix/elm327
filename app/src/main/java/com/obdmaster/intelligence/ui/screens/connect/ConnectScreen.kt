@@ -325,6 +325,11 @@ fun ConnectScreen(vm: MainViewModel) {
         msg?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
         err?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
+        var showLogPreview by remember { mutableStateOf(false) }
+        val logPreview = remember(showLogPreview) {
+            if (showLogPreview) vm.connectionLogPreview() else ""
+        }
+
         SectionCard("Kapcsolati napló / Connection log") {
             Text(
                 "CONNECT_START / BLE_GATT / BLE_SERVICES / BLE_CHARS / ELM_INIT / CONNECT_OK|FAIL",
@@ -336,10 +341,51 @@ fun ConnectScreen(vm: MainViewModel) {
                     enabled = !busy,
                     modifier = Modifier.weight(1f)
                 ) { Text("Export log") }
-                TextButton(onClick = { vm.clearConnectError() }) {
-                    Text("UI napló törlés")
-                }
+                OutlinedButton(
+                    onClick = {
+                        vm.copyConnectionLogToClipboard()
+                        showLogPreview = true
+                    },
+                    enabled = !busy,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Másolás vágólapra") }
             }
+            TextButton(onClick = { vm.clearConnectError() }) {
+                Text("UI napló törlés")
+            }
+        }
+
+        if (showLogPreview) {
+            AlertDialog(
+                onDismissRequest = { showLogPreview = false },
+                title = { Text("Kapcsolati napló (előnézet)") },
+                text = {
+                    val scroll = rememberScrollState()
+                    Column {
+                        Text(
+                            "A teljes napló a vágólapon van — illeszd be chatbe / e-mailbe.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            logPreview.ifBlank { "(üres)" },
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 320.dp)
+                                .verticalScroll(scroll)
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showLogPreview = false }) { Text("OK") }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        vm.copyConnectionLogToClipboard()
+                    }) { Text("Újra másolás") }
+                }
+            )
         }
 
         val logText = attemptLog ?: err

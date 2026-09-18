@@ -1,5 +1,7 @@
 package com.obdmaster.intelligence.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.FileProvider
@@ -225,26 +227,75 @@ class MainViewModel @Inject constructor(
     }
 
     fun shareConnectionLog() {
-        val file = clog.file()
-        if (!file.exists() || file.length() == 0L) {
+        val src = clog.file()
+        if (!src.exists() || src.length() == 0L) {
             _message.value = "Nincs connection log még. Előbb scan/connect."
             return
         }
-        val uri = FileProvider.getUriForFile(
-            appContext,
-            appContext.packageName + ".fileprovider",
-            file
-        )
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            putExtra(Intent.EXTRA_SUBJECT, "OBD connection.log")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        val body = clog.readAll()
+        try {
+            // Copy to cache with a clear export name — FileProvider + ClipData works reliably on Android 12.
+            val shareDir = File(appContext.cacheDir, "share").also { it.mkdirs() }
+            val shareFile = File(shareDir, "OBD_Master_connection.log")
+            src.copyTo(shareFile, overwrite = true)
+            val uri = FileProvider.getUriForFile(
+                appContext,
+                appContext.packageName + ".fileprovider",
+                shareFile
+            )
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "OBD_Master_connection.log")
+                clipData = ClipData.newUri(appContext.contentResolver, "OBD_Master_connection.log", uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val chooser = Intent.createChooser(send, "Kapcsolati napló megosztása").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                // Propagate ClipData / URI permission to the chooser + targets (Android 12+)
+                clipData = ClipData.newUri(appContext.contentResolver, "OBD_Master_connection.log", uri)
+            }
+            appContext.startActivity(chooser)
+            clog.log("SHARE", "file share ok uri=$uri size=${shareFile.length()}")
+            _message.value = "Napló megosztás: OBD_Master_connection.log"
+        } catch (e: Exception) {
+            clog.log("SHARE", "file share FAILED: ${e.javaClass.simpleName}: ${e.message}")
+            // Always-works fallback: plain text body (no FileProvider needed)
+            try {
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, "OBD_Master_connection.log")
+                    putExtra(Intent.EXTRA_TEXT, body)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                appContext.startActivity(
+                    Intent.createChooser(send, "Kapcsolati napló (szöveg)")
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                clog.log("SHARE", "EXTRA_TEXT fallback ok len=${body.length}")
+                _message.value = "Fájl megosztás sikertelen — szöveges napló megosztva."
+            } catch (e2: Exception) {
+                clog.log("SHARE", "EXTRA_TEXT also FAILED: ${e2.javaClass.simpleName}: ${e2.message}")
+                _message.value = "A napló nem megosztható: ${e2.message ?: e.message}"
+            }
         }
-        appContext.startActivity(
-            Intent.createChooser(intent, "Share connection log")
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
+    }
+
+    fun copyConnectionLogToClipboard() {
+        val body = clog.readAll()
+        if (body.isBlank()) {
+            _message.value = "Nincs connection log még. Előbb scan/connect."
+            return
+        }
+        try {
+            val cm = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("OBD_Master_connection.log", body))
+            clog.log("SHARE", "clipboard copy ok len=${body.length}")
+            _message.value = "Napló a vágólapra másolva (${body.length} karakter). Illeszd be a chatbe."
+        } catch (e: Exception) {
+            clog.log("SHARE", "clipboard FAILED: ${e.javaClass.simpleName}: ${e.message}")
+            _message.value = "Vágólap másolás sikertelen: ${e.message}"
+        }
     }
 
     fun connectionLogPreview(): String = clog.readAll().takeLast(4000)

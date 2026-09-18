@@ -8,7 +8,7 @@ Professzionális Android diagnosztikai alkalmazás **valós** OBD adapter kapcso
 > **Nincs demo/mock adat a termékútvonalon.** Élő teszt = élő adapter. Hardver szükséges.
 
 **Repo:** https://github.com/zsirafmix/elm327  
-**Package:** `com.obdmaster.intelligence` · minSdk 29 · targetSdk 34 · **v1.3.2**
+**Package:** `com.obdmaster.intelligence` · minSdk 29 · targetSdk 34 · **v1.3.3**
 
 ---
 
@@ -39,6 +39,7 @@ Professzionális Android diagnosztikai alkalmazás **valós** OBD adapter kapcso
 5. Zárd be a **Torque** / más OBD appot (egy RFCOMM kliens)  
 6. Legyél **közel**; gyújtás be (OBD táp)  
 8. v1.3.2: Classic **toAddress** path (SPP 20s×2 + ch1) — no more channels 1–30 marathon; shared session + INITIALIZING
+9. v1.3.3: Fix connection log share (ClipData + FileProvider cache `OBD_Master_connection.log` + EXTRA_TEXT fallback + Másolás vágólapra)
 7. v1.3.0: **folyamatos RX listener** (nem `available()` polling) + közös `>` prompt protokoll — ez volt a tipikus ELM „nem válaszol” oka  
 8. Soft recovery: ATSP0 + 0100 teljes bontás előtt  
 9. BLE: UUID hint mátrix (ffe0/fff0/ff00/6e400001 + write/notify)  
